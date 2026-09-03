@@ -5307,7 +5307,11 @@ public sealed class AppServices
             isParadigm: onParadigm,
             inventory: Inventory,
             itemLocations: GhItemLocations,
-            isRoomActivelyManaged: GhManagedRooms.IsManaged);
+            isRoomActivelyManaged: GhManagedRooms.IsManaged,
+            // Meters the get/drop batch: one command per prompt, so a room full of
+            // items can't outrun the game's command-rate limit and have the whole
+            // batch — plus the loop's next move — silently dropped.
+            promptScanner: PromptScanner);
 
         // A manually-typed movement step (one the walker / loop / auto-lair didn't
         // send — RoomTracker's echo-claim tells them apart) pauses the active nav

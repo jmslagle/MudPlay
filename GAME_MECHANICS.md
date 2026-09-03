@@ -2383,7 +2383,16 @@ processed — and the wording of the notice is **realm-specific**:
 Implication for bulk sends (e.g. `@roomba sync`, which can be ~20 telepaths): pace them
 out (MudPlay uses ~800ms between telepaths) so a burst never forms, and treat the
 "command ignored" / "too many messages" lines as a signal that the last send was lost
-and should be re-sent. This is distinct from the outbound-write **interleaving** bug
+and should be re-sent.
+
+**This applies to bulk `get`/`drop` just as much as to telepaths** *(2026-09-02, observed —
+capture `stock-20260902-224515`)*: a Roomba sort dispatching a whole room's batch at once
+(26 gets) tripped the stock limiter, and **every** command in the batch was dropped — as was
+the movement command that followed it, which left the tracker Pending on a move the server
+never processed and took the sweep down with it. The collateral damage to the *next* command
+is the part worth remembering: a flood doesn't just cost you the flooded batch. Roomba now
+releases get/drop one command per wire prompt, which needs no guess at the rate because the
+game's own prompt is the meter. This is distinct from the outbound-write **interleaving** bug
 (that was a client-side concurrency defect in `TelnetClient`, not a game rate limit).
 
 ## Spell targeting: monster type tags

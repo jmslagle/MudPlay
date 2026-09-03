@@ -62,6 +62,16 @@ public sealed class GhSweepManager : IDisposable
     // confirmation that DOES land, so a legitimately slow multi-item room
     // isn't cut short — only fires once confirmations stop arriving entirely.
     private static readonly TimeSpan DispatchSettleTimeout = TimeSpan.FromSeconds(2);
+
+    // Fallback pace when a prompt doesn't arrive to release the next queued
+    // command. Comfortably slower than the game's limit, so a batch that loses
+    // its prompts still drains — just at the safe rate instead of the live one.
+    private static readonly TimeSpan PromptWaitTimeout = TimeSpan.FromMilliseconds(800);
+
+    // Pause after the game complains about our command rate before resuming the
+    // queue. Matches RoombaSyncSender's clobber backoff, for the same reason:
+    // give the limiter time to forgive before pushing again.
+    private static readonly TimeSpan RateLimitBackoff = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan InventoryVerificationTimeout = TimeSpan.FromSeconds(3);
 
     // A dispatched `get` can come back as a failure this manager must act on
@@ -128,10 +138,15 @@ public sealed class GhSweepManager : IDisposable
     private readonly IDisposable _getSub;
     private readonly IDisposable _dropSub;
     private readonly IDisposable _dropRefusedSub;
+    private readonly IDisposable _commandIgnoredSub;
+    private readonly IDisposable _slowDownSub;
+    private readonly WirePromptScanner? _promptScanner;
 
     private readonly DispatcherTimer _reconSearchSettle;
     private readonly DispatcherTimer _dispatchSettle;
     private readonly DispatcherTimer _inventorySettle;
+    private readonly DispatcherTimer _promptWait;
+    private readonly DispatcherTimer _rateLimitBackoff;
 
     private Action<byte[]>? _wireSender;
     private bool _disposed;
@@ -143,6 +158,11 @@ public sealed class GhSweepManager : IDisposable
     // releases the hold while leaving unconfirmed work queued for the next lap.
     private RoomKey? _dispatchRoom;
     private readonly List<PendingSortMove> _outstandingDispatch = new();
+
+    // The dispatch batch, released one command per wire prompt rather than in a
+    // burst. See DispatchAtRoomAfterSearch for why the burst was fatal.
+    private readonly Queue<(string Verb, PendingSortMove Move)> _commandQueue = new();
+    private (string Verb, PendingSortMove Move)? _lastQueuedCommand;
 
     // Rooms the game refused a drop in ("There is no room to drop X here.") this
     // sweep. Two opposite effects from the one set: excluded as a DESTINATION, so
@@ -288,7 +308,8 @@ public sealed class GhSweepManager : IDisposable
         Func<bool>? isParadigm = null,
         InventoryManager? inventory = null,
         GhItemLocationStore? itemLocations = null,
-        Func<RoomKey, bool>? isRoomActivelyManaged = null)
+        Func<RoomKey, bool>? isRoomActivelyManaged = null,
+        WirePromptScanner? promptScanner = null)
     {
         ArgumentNullException.ThrowIfNull(labels);
         ArgumentNullException.ThrowIfNull(loopRunner);
@@ -315,6 +336,7 @@ public sealed class GhSweepManager : IDisposable
         // per-BBS). Defaults to "all managed" when unwired so tests that only label
         // rooms sweep them exactly as before.
         _isRoomActivelyManaged = isRoomActivelyManaged ?? (static _ => true);
+        _promptScanner = promptScanner;
         _log = log;
 
         _reconSearchSettle = new DispatcherTimer { Interval = ReconSearchSettle };
@@ -323,10 +345,20 @@ public sealed class GhSweepManager : IDisposable
         _dispatchSettle.Tick += (_, _) => OnDispatchSettleElapsed();
         _inventorySettle = new DispatcherTimer { Interval = InventoryVerificationTimeout };
         _inventorySettle.Tick += (_, _) => OnInventoryVerificationTimeout();
+        _promptWait = new DispatcherTimer { Interval = PromptWaitTimeout };
+        _promptWait.Tick += (_, _) => SendNextQueuedCommand();
+        _rateLimitBackoff = new DispatcherTimer { Interval = RateLimitBackoff };
+        _rateLimitBackoff.Tick += (_, _) => { _rateLimitBackoff.Stop(); SendNextQueuedCommand(); };
 
         _getSub = _router.Subscribe(KnownPatterns.PlayerGets, OnGetLine);
         _dropSub = _router.Subscribe(KnownPatterns.PlayerDrops, OnDropLine);
         _dropRefusedSub = _router.Subscribe(KnownPatterns.RoomDropRefused, OnDropRefusedLine);
+        // The game's own rate-limit signals. Both patterns already existed and
+        // nothing had ever subscribed to either, which is why a flooded dispatch
+        // looked like silence rather than a refusal.
+        _commandIgnoredSub = _router.Subscribe(KnownPatterns.CommandIgnored, _ => OnRateLimited(commandDropped: true));
+        _slowDownSub = _router.Subscribe(KnownPatterns.SlowDown, _ => OnRateLimited(commandDropped: false));
+        if (_promptScanner is not null) _promptScanner.PromptObserved += OnPromptObservedFromWire;
         // Raw-line hook for the get-FAILURE shapes (no KnownPattern for them);
         // gated hard on an outstanding get so a manual `get` failure isn't ours.
         _router.LineDispatched += OnLineForGetFailure;
@@ -400,6 +432,10 @@ public sealed class GhSweepManager : IDisposable
         _leftInPlace.Clear();
         _stranded.Clear();
         _fullRooms.Clear();
+        _commandQueue.Clear();
+        _lastQueuedCommand = null;
+        _promptWait.Stop();
+        _rateLimitBackoff.Stop();
         CompletedReconLaps = 0;
         _sortLapCount = 0;
         _progressSnapshotMoved = 0;
@@ -1045,13 +1081,98 @@ public sealed class GhSweepManager : IDisposable
         _outstandingDispatch.Clear();
         _outstandingDispatch.AddRange(drops);
         _outstandingDispatch.AddRange(gets);
+
+        // Queue the batch and release it one command per prompt. Dumping a whole
+        // room's worth at once trips the game's command-rate limit (stock nudges
+        // with "Why don't you slow down for a few seconds?" then drops commands
+        // outright with "You are typing too quickly"), and once that happens NONE
+        // of the batch lands — nor does the loop's next move, which leaves the
+        // tracker Pending on a move the server never processed. Letting the
+        // game's own prompt meter the send makes that unreachable by
+        // construction, and needs no guess at the rate.
+        _commandQueue.Clear();
+        foreach (PendingSortMove move in drops) _commandQueue.Enqueue(("drop", move));
+        foreach (PendingSortMove move in gets) _commandQueue.Enqueue(("get", move));
+        SendNextQueuedCommand();
+    }
+
+    // Release one queued get/drop. Re-arms both the settle timer (so it measures
+    // "confirmations stopped arriving", not "the batch is long") and the
+    // prompt-timeout backstop.
+    private void SendNextQueuedCommand()
+    {
+        _promptWait.Stop();
+        if (_commandQueue.Count == 0) return;
+
+        (string verb, PendingSortMove move) = _commandQueue.Dequeue();
+        _lastQueuedCommand = (verb, move);
         _dispatchSettle.Stop();
         _dispatchSettle.Start();
+        CountedCommand.Emit(Send, verb, move.Count, move.ItemName, _isParadigm());
 
-        foreach (PendingSortMove move in drops)
-            CountedCommand.Emit(Send, "drop", move.Count, move.ItemName, _isParadigm());
-        foreach (PendingSortMove move in gets)
-            CountedCommand.Emit(Send, "get", move.Count, move.ItemName, _isParadigm());
+        // A prompt normally releases the next one. Arm a bounded fallback so a
+        // prompt we never see (or one swallowed by an interleaved burst) can't
+        // strand the rest of the batch.
+        if (_commandQueue.Count > 0) _promptWait.Start();
+    }
+
+    // The wire prompt came back, so the game has processed the last command.
+    private void OnPromptObservedFromWire(Services.PromptObservation _) => OnPromptObserved();
+
+    private void OnPromptObserved()
+    {
+        if (Phase != SweepPhase.Sorting) return;
+        // Held off while the game is telling us to slow down; the backoff timer
+        // owns the restart from there.
+        if (_rateLimitBackoff.IsEnabled) return;
+        SendNextQueuedCommand();
+    }
+
+    // Abandon whatever is left of the batch. Anything unsent stays on _pending
+    // and is retried on a later visit, exactly like an unconfirmed command.
+    private void ClearCommandQueue()
+    {
+        _commandQueue.Clear();
+        _lastQueuedCommand = null;
+        _promptWait.Stop();
+        _rateLimitBackoff.Stop();
+    }
+
+    // Test seams — drive the paced dispatch headless, without a wire or timers.
+    internal void FirePromptForTests() => OnPromptObserved();
+    internal void FirePromptWaitTimeoutForTests() => SendNextQueuedCommand();
+    internal void FireRateLimitBackoffForTests()
+    {
+        _rateLimitBackoff.Stop();
+        SendNextQueuedCommand();
+    }
+    internal int QueuedCommandCountForTests => _commandQueue.Count;
+
+    // The game reported a rate-limit clobber. On the hard form the last command
+    // was DROPPED, so re-queue it at the front; on the soft nudge it probably
+    // landed, so just leave a gap. Either way stop pushing for a beat.
+    private void OnRateLimited(bool commandDropped)
+    {
+        if (Phase != SweepPhase.Sorting) return;
+        if (_commandQueue.Count == 0 && _lastQueuedCommand is null) return;
+
+        if (commandDropped && _lastQueuedCommand is { } last)
+        {
+            // Put it back at the head, ahead of everything still waiting.
+            Queue<(string Verb, PendingSortMove Move)> restored = new();
+            restored.Enqueue(last);
+            foreach ((string, PendingSortMove) queued in _commandQueue) restored.Enqueue(queued);
+            _commandQueue.Clear();
+            foreach ((string, PendingSortMove) queued in restored) _commandQueue.Enqueue(queued);
+            _lastQueuedCommand = null;
+        }
+
+        _log?.Warn(LogCategory,
+            $"rate-limited mid-dispatch ({(commandDropped ? "command dropped" : "slow-down nudge")}); "
+            + $"backing off with {_commandQueue.Count} command(s) still queued");
+        _promptWait.Stop();
+        _rateLimitBackoff.Stop();
+        _rateLimitBackoff.Start();
     }
 
     // Backstop for a dispatched get/drop that fails without a confirmation line
@@ -1067,6 +1188,16 @@ public sealed class GhSweepManager : IDisposable
         _dispatchSettle.Stop();
         if (Phase != SweepPhase.Sorting || _outstandingDispatch.Count == 0) return;
 
+        // Still feeding the batch out (or sitting in a rate-limit backoff, which
+        // is deliberately longer than this window). "Confirmations stopped" isn't
+        // a meaningful reading until every command has actually been sent, so
+        // wait rather than abandoning a batch that's simply being paced.
+        if (_commandQueue.Count > 0 || _rateLimitBackoff.IsEnabled)
+        {
+            _dispatchSettle.Start();
+            return;
+        }
+
         _log?.Warn(LogCategory,
             $"dispatch settle timeout at {_dispatchRoom}: {_outstandingDispatch.Count} unconfirmed "
             + $"command(s) — leaving them queued for a later-lap retry: "
@@ -1074,6 +1205,7 @@ public sealed class GhSweepManager : IDisposable
 
         _outstandingDispatch.Clear();
         _dispatchRoom = null;
+        ClearCommandQueue();
         // Trust the ledger — a lost command just means that move stays queued; no
         // `i` needed. (A real capacity refusal arrives as its own line and resyncs.)
         ContinueAfterTransaction("dispatch settle timeout");
@@ -1568,6 +1700,11 @@ public sealed class GhSweepManager : IDisposable
         _getSub.Dispose();
         _dropSub.Dispose();
         _dropRefusedSub.Dispose();
+        _commandIgnoredSub.Dispose();
+        _slowDownSub.Dispose();
+        if (_promptScanner is not null) _promptScanner.PromptObserved -= OnPromptObservedFromWire;
+        _promptWait.Stop();
+        _rateLimitBackoff.Stop();
         _router.LineDispatched -= OnLineForGetFailure;
         _loopRunner.Event -= OnLoopEvent;
         _groundItems.SurveyUpdated -= OnSurveyUpdated;

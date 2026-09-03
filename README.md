@@ -1,7 +1,9 @@
 # MudPlay
 
 <!-- current-version:start -->
-> **Version 3.46.5**
+> **Version 3.46.6**
+> - Roomba sends its get/drop commands one per game prompt instead of dumping a whole room's batch at once, which was tripping the game's command-rate limit and getting the entire batch — plus the move that followed it — silently dropped
+> - A command the game reports as dropped is re-sent after a short back-off rather than lost
 > - Roomba handles a destination room being full: it reroutes everything bound there to the next room labelled for the same category, then the catch-all, instead of re-sending refused drops on every lap forever
 > - A backup room is just a second room labelled for the same category — no new setting
 > - Items with nowhere left to go are recorded with the reason rather than retried, and the sweep summary names the rooms that filled up
