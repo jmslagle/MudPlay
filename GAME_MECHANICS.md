@@ -855,6 +855,25 @@ Two details that matter:
 The exact capacity is unknown, and the client never needs it: "full" is only ever learned by being
 refused.
 
+**Capacity is per OBJECT, not per item — so a stacking drop may still fit a "full" room**
+*(2026-09-03, user; mechanism UNVERIFIED)*. The sysop dump counts floor *objects*, and an id can
+appear more than once: two black star keys dropped singly read `172(0) 172(0)` (two objects), while
+two diamonds read `902(1)` (one object of two). So stacking is item-dependent, and an item that
+stacks onto a pile already on the floor consumes no new slot — meaning a room that refuses one item
+can still accept another that stacks with its existing contents.
+
+**What isn't known**: which items stack. There may be a column in the Items table for it (unchecked —
+don't assume a plausibly-named column means this without confirming), and a stack may itself have a
+size limit. **The experiment**: in a room that has just refused a drop, try dropping an item that
+matches something already on its floor. Success means stacking bypasses the object cap; a second
+refusal means it doesn't, or that pile is itself full.
+
+**Client implication (Roomba Mode)**: the sweep currently treats a refusal as "this room is full for
+everything" and re-targets the whole batch, which is correct but conservative — it gives up on
+stackable items that would have fitted. The cheap empirical fix (retry an item whose name already
+appears in that room's survey, once, before re-targeting it) is deliberately NOT implemented while
+the mechanism is unverified.
+
 **Client implication (Roomba Mode):** a refusal marks that room full for the rest of the sweep. Every
 pending move bound there — carried or not yet collected — is re-resolved onto the next room labeled
 for the same category, then the catch-all; anything with nowhere left is recorded and dropped from
