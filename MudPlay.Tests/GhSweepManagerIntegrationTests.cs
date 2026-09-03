@@ -1152,6 +1152,65 @@ public sealed class GhSweepManagerIntegrationTests : IDisposable
     }
 
     [Fact]
+    public void GetRefusedWithTheCurrencySyntax_IsStrandedNotRetriedForever()
+    {
+        // The live realm emits BRACES — "Syntax: GET {Amount} {Currency}" — while
+        // the pattern had been written for the bracket form recorded in
+        // GAME_MECHANICS. It therefore never matched, so an item the game won't
+        // take by that name failed silently and was requeued every lap: one
+        // capture shows `get piece of amber` sent 42 times, with the sweep pinned
+        // ping-ponging between the two rooms holding those items.
+        SweepHarness h = NewSweepHarness(_root, _scratchBbs);
+
+        h.Tracker.SetLocated(new RoomKey(1, 1));
+        Assert.True(h.Sweep.Start());
+
+        h.Feed("You notice a war hammer here.");
+        h.Observe("C", Direction.N, Direction.S);
+        h.Observe("B", Direction.S);
+        h.Observe("C", Direction.N, Direction.S);
+        h.Observe("A", Direction.N);
+        Assert.Equal(GhSweepManager.SweepPhase.Sorting, h.Sweep.Phase);
+
+        h.Observe("C", Direction.N, Direction.S);
+        Assert.Equal("get war hammer", h.Sent[^1]);
+        int getsSent = h.Sent.Count(c => c == "get war hammer");
+
+        h.Feed("Syntax: GET {Amount} {Currency}");
+
+        Assert.Equal(0, h.Sweep.PendingMoveCount);
+        Assert.Contains(h.Sweep.LeftInPlace, l => l.ItemName == "war hammer");
+        Assert.Equal(getsSent, h.Sent.Count(c => c == "get war hammer"));
+
+        h.Dispose();
+    }
+
+    [Fact]
+    public void GetCurrencySyntax_BracketFormIsStillRecognised()
+    {
+        // Keep the documented bracket form working — the realms may differ, and
+        // the cost of missing either is an item retried until someone notices.
+        SweepHarness h = NewSweepHarness(_root, _scratchBbs);
+
+        h.Tracker.SetLocated(new RoomKey(1, 1));
+        Assert.True(h.Sweep.Start());
+
+        h.Feed("You notice a war hammer here.");
+        h.Observe("C", Direction.N, Direction.S);
+        h.Observe("B", Direction.S);
+        h.Observe("C", Direction.N, Direction.S);
+        h.Observe("A", Direction.N);
+        h.Observe("C", Direction.N, Direction.S);
+        Assert.Equal("get war hammer", h.Sent[^1]);
+
+        h.Feed("Syntax: GET [Amount] [Currency]");
+
+        Assert.Equal(0, h.Sweep.PendingMoveCount);
+
+        h.Dispose();
+    }
+
+    [Fact]
     public void CleanlyFinishedSweep_HasNothingToResume()
     {
         SweepHarness h = NewSweepHarness(_root, _scratchBbs);

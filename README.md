@@ -1,7 +1,8 @@
 # MudPlay
 
 <!-- current-version:start -->
-> **Version 3.47.2**
+> **Version 3.47.3**
+> - Fixed Roomba retrying an item the game refuses forever: the "GET {Amount} {Currency}" refusal uses braces, not the brackets the matcher was looking for, so it had never matched — one run sent `get piece of amber` 42 times and left the sweep ping-ponging between two rooms it could never empty
 > - Roomba no longer writes off heavy items as "too heavy to carry" because your pack happened to be full of loot at the time — that call is now judged against the pack at its emptiest, while live headroom still tracks reality
 > - When your pack is so full of things Roomba didn't collect that it has room for barely one item, it now delivers what it's holding and stops with the reason, instead of shuttling a single item per round trip forever
 > - Roomba's command pacing no longer speeds up when the game tells it to slow down: a prompt can gate a send but can't release one early, since every rate-limit line the game emits carries a prompt of its own

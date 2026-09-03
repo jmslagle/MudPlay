@@ -1,5 +1,9 @@
 # Version history
 
+## 3.47.3
+
+- Fixed Roomba retrying an item the game refuses forever: the "GET {Amount} {Currency}" refusal uses braces, not the brackets the matcher was looking for, so it had never matched — one run sent `get piece of amber` 42 times and left the sweep ping-ponging between two rooms it could never empty
+
 ## 3.47.2
 
 - Roomba no longer writes off heavy items as "too heavy to carry" because your pack happened to be full of loot at the time — that call is now judged against the pack at its emptiest, while live headroom still tracks reality. One run discarded 56 items this way, including armour that fit fine at the sweep's own opening budget

@@ -97,8 +97,15 @@ public sealed class GhSweepManager : IDisposable
     private static readonly Regex GetNotHereRegex = new(
         @"^\s*You don't see (?<echo>.+?) here\.\s*$",
         RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    // Both bracket and brace forms. GAME_MECHANICS recorded this as
+    // "Syntax: GET [Amount] [Currency]" and the pattern faithfully implemented
+    // that — but the live realm emits BRACES, so it never matched a single one.
+    // The cost was invisible and large: an item the game won't take by that name
+    // failed silently, was never stranded, and got retried every lap forever
+    // (one capture shows `get piece of amber` sent 42 times), which also pinned
+    // the sweep ping-ponging between the two rooms holding them.
     private static readonly Regex GetCurrencySyntaxRegex = new(
-        @"^\s*Syntax:\s*GET\s*\[Amount\]\s*\[Currency\]",
+        @"^\s*Syntax:\s*GET\s*[\[{]Amount[\]}]\s*[\[{]Currency[\]}]",
         RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     private static readonly Regex GetCannotCarryRegex = new(
         @"^\s*You cannot carry that much!\s*$",
@@ -113,7 +120,7 @@ public sealed class GhSweepManager : IDisposable
     // the usual cause is that we aren't holding it — the ledger believes a pickup
     // landed that actually didn't. Confirmed live 2026-09-02.
     private static readonly Regex DropCurrencySyntaxRegex = new(
-        @"^\s*Syntax:\s*DROP\s*\{Amount\}\s*\{Currency\}",
+        @"^\s*Syntax:\s*DROP\s*[\[{]Amount[\]}]\s*[\[{]Currency[\]}]",
         RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     // The other face of the same problem, and the more dangerous one. The game
@@ -1755,10 +1762,20 @@ public sealed class GhSweepManager : IDisposable
                 StrandFailedGet(move, $"game reports it isn't there (\"{line.Text.Trim()}\")");
             return;
         }
-        // The currency-syntax misparse names no item, so only attribute it when a
-        // single get is outstanding; retrying the same name can't help either way.
-        if (GetCurrencySyntaxRegex.IsMatch(line.Text) && gets.Count == 1)
-            StrandFailedGet(gets[0], "game misparsed the get as a currency command");
+        // The currency-syntax misparse names no item. Dispatch is paced one
+        // command per prompt, so the command just sent is the one that failed —
+        // attribute to it rather than requiring a single outstanding get, which
+        // was rarely true in a batch and left the failure unattributed. Retrying
+        // the same name can't help, so it's stranded either way.
+        if (GetCurrencySyntaxRegex.IsMatch(line.Text))
+        {
+            PendingSortMove? failed =
+                _lastQueuedCommand is { Verb: "get", Move: { } sent } && gets.Contains(sent)
+                    ? sent
+                    : gets.Count == 1 ? gets[0] : null;
+            if (failed is not null)
+                StrandFailedGet(failed, "game misparsed the get as a currency command");
+        }
     }
 
     // The game didn't recognise our drop's item name, which almost always means we

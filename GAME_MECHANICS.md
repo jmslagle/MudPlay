@@ -798,9 +798,15 @@ A `get <item>` that can't succeed replies with one of two shapes:
   player took it). `<echo>` is whatever text followed `get`, echoed back verbatim (`get rod` →
   `You don't see rod here.`; `get warhorn` → `You don't see warhorn here.`), so it can be a bare
   word rather than the item's full name.
-- **`Syntax: GET [Amount] [Currency]`** — the game misparsed the item name as a **currency** get
-  (observed for some multi-word names, e.g. `get silk cape`). No item name is echoed. Retrying the
-  same name can't help.
+- **`Syntax: GET {Amount} {Currency}`** — the game misparsed the item name as a **currency** get
+  (observed for some multi-word names, e.g. `get silk cape`, and for gem/stone names like `piece of
+  amber`). No item name is echoed. Retrying the same name can't help.
+  **Note the BRACES** *([CORRECTED] 2026-09-03, live capture)*: this was recorded here with square
+  brackets, and the client's matcher implemented that faithfully — so it matched nothing on the live
+  realm for as long as it existed. The failure was invisible and expensive: an unmatched refusal is
+  not stranded, so the item is retried every lap forever (`get piece of amber` sent 42 times in one
+  capture) and can pin a sweep ping-ponging between the rooms holding such items. Match **either**
+  form; the DROP counterpart below uses braces too.
 - **`Syntax: DROP {Amount} {Currency}`** — the **drop** counterpart, confirmed 2026-09-02. Note the
   **braces**, where the get form uses brackets. Same shape otherwise: no item name is echoed, and it
   means the game didn't recognise the name as something you're holding — usually because you aren't.
