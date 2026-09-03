@@ -217,6 +217,11 @@ public sealed class GhSweepManager : IDisposable
     // to correct the weight baseline.
     private bool _verifyCarriedAfterResync;
 
+    // True while emptying a near-full pack before collecting anything more. Owned
+    // here rather than in the pure planner because the whole point is that it
+    // persists between decisions — that's what makes it a run instead of a flap.
+    private bool _unloading;
+
     // Baseline captured at sort start (and corrected on a resync): base = the
     // player's gear+pack weight carrying zero Roomba pickups; max = MaxWeight.
     // int.MaxValue max means "no weight data" → fill everything, strand nothing.
@@ -484,6 +489,7 @@ public sealed class GhSweepManager : IDisposable
         _awaitingInventoryResync = false;
         _resyncPending = false;
         _verifyCarriedAfterResync = false;
+        _unloading = false;
         _baseCarryWeight = 0;
         _maxCarryWeight = int.MaxValue;
 
@@ -1672,10 +1678,10 @@ public sealed class GhSweepManager : IDisposable
         // Weight-aware, trip-minimizing pick: keep filling the pack (nearest source
         // whose batch fits the live headroom) before delivering (nearest carried
         // destination). See GhSortPlanner.
-        List<RoomKey> carried = _pending
+        List<GhSortPlanner.CarriedLoad> carried = _pending
             .Where(p => p.IsCarried && !p.Delivered)
-            .Select(p => p.To)
-            .Distinct()
+            .GroupBy(p => p.To)
+            .Select(g => new GhSortPlanner.CarriedLoad(g.Key, g.Sum(MoveWeight)))
             .ToList();
         // A room is a candidate source as long as its LIGHTEST pending move fits the
         // headroom (not its whole sum) — so a room holding a big split stack, or a
@@ -1687,8 +1693,20 @@ public sealed class GhSweepManager : IDisposable
             .Select(g => new GhSortPlanner.PickupRoom(g.Key, g.Min(MoveWeight)))
             .ToList();
 
+        // Above 80% of the working budget we stop collecting and empty the pack
+        // down past 40% before filling again, heaviest stop first. Without the
+        // hysteresis a saturated pack alternates deliver-one / collect-one and
+        // walks the same long leg twice per item.
+        bool wasUnloading = _unloading;
+        _unloading = GhSortPlanner.ShouldUnload(_unloading, LedgerCarriedWeight(), WorkingBudget());
+        if (_unloading != wasUnloading)
+            _log?.Info(LogCategory, _unloading
+                ? $"pack at {LedgerCarriedWeight()}/{WorkingBudget()} — delivering until it's back under "
+                  + $"{GhSortPlanner.UnloadExitLoad:P0} before collecting again"
+                : $"pack down to {LedgerCarriedWeight()}/{WorkingBudget()} — collecting again");
+
         RoomKey? target = GhSortPlanner.NextTarget(
-            carried, pickups, CurrentHeadroom(), _bfs.ComputeDistancesFrom(here), _fullRooms);
+            carried, pickups, CurrentHeadroom(), _bfs.ComputeDistancesFrom(here), _fullRooms, _unloading);
         if (target is not { } destination) return false;
 
         var shuttle = new Loop(SweepLoopName, new[] { here, destination });
@@ -1710,7 +1728,7 @@ public sealed class GhSweepManager : IDisposable
             return Phase != SweepPhase.Sorting; // a synchronous Failed event already ended the sweep
         }
 
-        string targetKind = carried.Contains(destination) ? "drop" : "pickup";
+        string targetKind = carried.Any(c => c.Room.Equals(destination)) ? "drop" : "pickup";
         _log?.Info(LogCategory,
             $"shortest-work reroute: {here} -> {destination} ({targetKind}, "
             + $"{_bfs.DistanceBetween(here, destination)} hop(s))");

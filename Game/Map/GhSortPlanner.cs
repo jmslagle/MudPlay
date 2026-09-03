@@ -29,22 +29,53 @@ public static class GhSortPlanner
     // reaches this planner.
     public readonly record struct PickupRoom(RoomKey Room, int Weight);
 
+    // A destination we're carrying for, and the total weight of the carried items
+    // bound there — how much of the pack that one stop empties.
+    public readonly record struct CarriedLoad(RoomKey Room, int Weight);
+
+    // Load fractions for the unload run below. Enter at 80% of the working budget,
+    // stay in it until the pack is back under 40%.
+    public const double UnloadEntryLoad = 0.80;
+    public const double UnloadExitLoad = 0.40;
+
+    // Should the caller be in an unload run right now? Hysteresis, not a single
+    // threshold: with one line the pack sits AT the limit and alternates
+    // deliver-one / collect-one, which is the 14-hops-per-item shuttle this
+    // replaces. Enter high, leave low, and the run is a run.
+    public static bool ShouldUnload(bool unloadingNow, int carriedWeight, int workingBudget)
+    {
+        if (workingBudget <= 0 || workingBudget == int.MaxValue) return false;
+        double load = (double)carriedWeight / workingBudget;
+        return unloadingNow ? load > UnloadExitLoad : load >= UnloadEntryLoad;
+    }
+
     // The next room to route to, or null when nothing else can be done from here
     // (nothing carried and no source currently fits — the caller then finishes, or
     // waits for headroom it can't get). All distances are hops FROM the current
     // room (distancesFromHere), with self (0) and unreachable rooms skipped.
     //
-    //   carried  = distinct destination rooms of items already in the pack.
+    //   carried  = destination rooms of items in the pack + the weight bound to each.
     //   pickups  = rooms with pending pickups + each room's LIGHTEST pickup weight.
     //   headroom = working budget minus what's already carried (from the ledger).
     //   full     = rooms the game has refused a drop in this sweep.
+    //   unloading = we're in an unload run (see ShouldUnload): collect nothing, and
+    //               head for the stop that sheds the most weight.
     public static RoomKey? NextTarget(
-        IReadOnlyCollection<RoomKey> carried,
+        IReadOnlyCollection<CarriedLoad> carried,
         IReadOnlyCollection<PickupRoom> pickups,
         int headroom,
         IReadOnlyDictionary<RoomKey, int> distancesFromHere,
-        IReadOnlySet<RoomKey>? full = null)
+        IReadOnlySet<RoomKey>? full = null,
+        bool unloading = false)
     {
+        // Unload run: stop collecting entirely and empty the pack, heaviest stop
+        // first. Topping up between deliveries is what kept the pack pinned at the
+        // limit — each delivery freed just enough for one more light item, so the
+        // sweep walked the same long leg twice per item while carrying dozens it
+        // never delivered.
+        if (unloading && Heaviest(carried, distancesFromHere) is { } unloadStop)
+            return unloadStop;
+
         List<RoomKey> fitting = pickups.Where(p => p.Weight <= headroom).Select(p => p.Room).ToList();
 
         // Relieve the full rooms first, even when they're farther off. What's
@@ -65,10 +96,34 @@ public static class GhSortPlanner
         // No source fits (pack full, or headroom too small) — deliver to the
         // nearest destination of something we're carrying, which frees headroom for
         // the next fill.
-        if (Nearest(carried, distancesFromHere) is { } destination)
+        if (Nearest(carried.Select(c => c.Room), distancesFromHere) is { } destination)
             return destination;
 
         return null;
+    }
+
+    // The carried destination holding the most weight — the stop that frees the
+    // most capacity. Distance breaks ties, so two equally-laden stops resolve to
+    // the closer one rather than arbitrarily.
+    private static RoomKey? Heaviest(
+        IEnumerable<CarriedLoad> carried, IReadOnlyDictionary<RoomKey, int> distancesFromHere)
+    {
+        RoomKey? best = null;
+        int bestWeight = -1;
+        int bestDist = int.MaxValue;
+        foreach (CarriedLoad load in carried)
+        {
+            if (!distancesFromHere.TryGetValue(load.Room, out int d) || d <= 0) continue;
+            if (load.Weight > bestWeight
+                || (load.Weight == bestWeight
+                    && (d < bestDist || (d == bestDist && best is { } b && SortsBefore(load.Room, b)))))
+            {
+                bestWeight = load.Weight;
+                bestDist = d;
+                best = load.Room;
+            }
+        }
+        return best;
     }
 
     // Split a stack of `total` units into consecutive loads of at most `perTrip`

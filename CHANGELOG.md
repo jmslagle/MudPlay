@@ -1,5 +1,9 @@
 # Version history
 
+## 3.46.10
+
+- Roomba stops collecting once the pack passes 80% of its carry budget and empties down below 40% before filling again, heaviest destination first. A saturated pack used to alternate deliver-one / collect-one and walk the same long leg twice for every single item while carrying dozens it never delivered
+
 ## 3.46.9
 
 - Roomba no longer collects items auto-discard is set to throw away — the two were fighting over the same loot every lap

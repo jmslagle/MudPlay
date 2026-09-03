@@ -1,7 +1,8 @@
 # MudPlay
 
 <!-- current-version:start -->
-> **Version 3.46.9**
+> **Version 3.46.10**
+> - Roomba stops collecting once the pack passes 80% of its carry budget and empties down below 40% before filling again, heaviest destination first. A saturated pack used to alternate deliver-one / collect-one and walk the same long leg twice for every single item while carrying dozens it never delivered
 > - Roomba no longer collects items auto-discard is set to throw away — the two were fighting over the same loot every lap
 > - If anything else empties your hands mid-sweep (auto-discard, a manual drop), Roomba forgets the item instead of planning a delivery for something it no longer holds. This mattered: the game matches a drop's name against what you actually carry, so a drop for a missing item could latch onto a different item you still had
 > - `You may not drop that item!` now triggers the same inventory check as the currency-syntax refusal
