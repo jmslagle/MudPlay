@@ -1,5 +1,13 @@
 # Version history
 
+## 3.45.0
+
+- Reads the game's `sysop status` room dump — for characters flagged with sysop / goto powers on their BBS
+- The dump's exact map/room number is the groundwork for recovering the client's position without walking backwards to work it out
+- Sysop commands stay off unless you tick "I have sysop / goto powers"; one unanswered probe switches them off for the session
+- Item lists in the dump survive the game's 80-column wrapping, which splits ids mid-number
+- Items table's `Gettable` flag is now indexed, so room fixtures can be told apart from real loot
+
 ## 3.44.25
 
 - Navigation rail entries that are too long for a narrow panel now show their full text on hover — the status line, GOTO / loop / lair / favourite rows, the live step list, search results, folder names, and the exp-estimator rows

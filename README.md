@@ -1,9 +1,12 @@
 # MudPlay
 
 <!-- current-version:start -->
-> **Version 3.44.25**
-> - Navigation rail entries that are too long for a narrow panel now show their full text on hover — the status line, GOTO / loop / lair / favourite rows, the live step list, search results, folder names, and the exp-estimator rows
-> - The nav status line is now colour-coded: amber while movement is held for a reason (resting, held, confused, party wait, Auto-All off…) and red when a nav action fails or the tracker loses your position
+> **Version 3.45.0**
+> - Reads the game's `sysop status` room dump — for characters flagged with sysop / goto powers on their BBS
+> - The dump's exact map/room number is the groundwork for recovering the client's position without walking backwards to work it out
+> - Sysop commands stay off unless you tick "I have sysop / goto powers"; one unanswered probe switches them off for the session
+> - Item lists in the dump survive the game's 80-column wrapping, which splits ids mid-number
+> - Items table's `Gettable` flag is now indexed, so room fixtures can be told apart from real loot
 >
 > See the [version history](CHANGELOG.md) for the full changelog.
 <!-- current-version:end -->
