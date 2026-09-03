@@ -787,6 +787,114 @@ public sealed class GhSweepManagerIntegrationTests : IDisposable
     }
 
     [Fact]
+    public void ItemBinnedByAnotherEngineMidSweep_DropsTheMoveInsteadOfCarryingABelief()
+    {
+        // The live failure: auto-discard binned bloodstones Roomba had collected.
+        // Roomba kept believing it held them, and its eventual "drop bloodstone"
+        // was partial-matched by the game onto a bloodstone ORB it really was
+        // holding. That one bounced (undroppable) — a droppable collision would
+        // have thrown away the wrong item silently.
+        Directory.CreateDirectory(Path.Combine(_root, "alpha"));
+        File.WriteAllText(Path.Combine(_root, "alpha", "Rooms.json"), """
+            [
+              { "Map Number": 1, "Room Number": 1, "Name": "A", "Light": 0, "Shop": 0, "Lair": "", "Delay": 0,
+                "N": "1/3", "S": "0", "E": "0", "W": "0", "NE": "0", "NW": "0", "SE": "0", "SW": "0", "U": "0", "D": "0" },
+              { "Map Number": 1, "Room Number": 2, "Name": "B", "Light": 0, "Shop": 0, "Lair": "", "Delay": 0,
+                "N": "0", "S": "1/3", "E": "0", "W": "0", "NE": "0", "NW": "0", "SE": "0", "SW": "0", "U": "0", "D": "0" },
+              { "Map Number": 1, "Room Number": 3, "Name": "C", "Light": 0, "Shop": 0, "Lair": "", "Delay": 0,
+                "N": "1/2", "S": "1/1", "E": "0", "W": "0", "NE": "0", "NW": "0", "SE": "0", "SW": "0", "U": "0", "D": "0" }
+            ]
+            """);
+        File.WriteAllText(Path.Combine(_root, "alpha", "Items.json"), """
+            [
+              { "Number": 1, "Name": "war hammer", "ItemType": 1, "Encum": 1 }
+            ]
+            """);
+
+        GameDataCache cache = new(_root);
+        cache.SwitchSet("alpha");
+        RoomGraphManager graph = new(cache);
+        graph.OnActiveSetChanged("alpha");
+        ItemNameStore names = new(cache);
+        names.OnActiveSetChanged("alpha");
+
+        ProfileService profile = new();
+        profile.LoadBlank();
+        GhRoomLabelStore labels = new(profile);
+        labels.OnBbsPinApplied(_scratchBbs);
+        labels.SetLabel(new RoomKey(1, 1),
+            new[] { GhCategoryRule.ForItemType(1) }, isCatchAll: false);
+        labels.SetLabel(new RoomKey(1, 2),
+            new[] { GhCategoryRule.ForItemType(0) }, isCatchAll: false);
+        labels.SetSearchesPerRoom(1);
+        labels.SetSearchForHidden(false);
+
+        MessageRouter router = new();
+        DefaultPatterns.Seed(router);
+        GroundItemTracker ground = new(router, new CurrencyNaming(),
+            entry => names.FindByName(entry) is not null);
+        InventoryManager inventory = new(itemWeightResolver: names.WeightOf);
+        LineExtractor inventoryLines = new(new TerminalEmulator(80, 24));
+        inventory.AttachLineExtractor(inventoryLines);
+        FeedInventory(inventoryLines, "nothing");
+
+        RoomTracker tracker = new(graph);
+        MovementCoordinator coordinator = new();
+        GhSweepManager? sweep = null;
+        tracker.StateChanged += transition =>
+        {
+            if (transition.NewRoom is null) return;
+            if (transition.PreviousRoom is { } previous
+                && previous.Key.Equals(transition.NewRoom.Key)) return;
+            ground.OnRoomChanged();
+            sweep?.OnRoomChanged(transition);
+        };
+
+        BfsMapper bfs = new(graph);
+        LoopRunner runner = new(tracker, coordinator, graph: graph, bfs: bfs,
+            postToUi: action => action());
+        sweep = new GhSweepManager(labels, runner, tracker, bfs, ground, names,
+            router, coordinator, isOtherEngineBusy: () => false,
+            isParadigm: () => true, inventory: inventory);
+
+        var sent = new List<string>();
+        sweep.SetWireSender(bytes => sent.Add(Encoding.Latin1.GetString(bytes).TrimEnd('\r')));
+        runner.SetWireSender(bytes => sent.Add(Encoding.Latin1.GetString(bytes).TrimEnd('\r')));
+
+        tracker.SetLocated(new RoomKey(1, 1));
+        Assert.True(sweep.Start());
+
+        FeedRouter(router, "You notice a war hammer here.");
+        tracker.NoteRoomObserved(new RoomObservation("C", new HashSet<Direction> { Direction.N, Direction.S }),
+            DateTimeOffset.UtcNow.AddSeconds(1));
+        tracker.NoteRoomObserved(new RoomObservation("B", new HashSet<Direction> { Direction.S }),
+            DateTimeOffset.UtcNow.AddSeconds(2));
+        tracker.NoteRoomObserved(new RoomObservation("C", new HashSet<Direction> { Direction.N, Direction.S }),
+            DateTimeOffset.UtcNow.AddSeconds(3));
+        tracker.NoteRoomObserved(new RoomObservation("A", new HashSet<Direction> { Direction.N }),
+            DateTimeOffset.UtcNow.AddSeconds(4));
+
+        tracker.NoteRoomObserved(new RoomObservation("C", new HashSet<Direction> { Direction.N, Direction.S }),
+            DateTimeOffset.UtcNow.AddSeconds(5));
+        Assert.Equal("get war hammer", sent[^1]);
+        FeedRouter(router, "You took war hammer.");
+        Assert.Equal(1, sweep.CarriedPendingCount);
+
+        // Another engine bins it while we walk. No dispatch of ours is in flight.
+        int before = sent.Count;
+        FeedRouter(router, "You dropped war hammer.");
+
+        // The belief is dropped, so no phantom "drop war hammer" is ever queued.
+        Assert.Equal(0, sweep.CarriedPendingCount);
+        Assert.Contains(sweep.LeftInPlace, l => l.Reason == GhLeftReason.NotActuallyCarried);
+        Assert.Equal(before, sent.Count);
+
+        sweep.Dispose();
+        ground.Dispose();
+        inventory.Dispose();
+    }
+
+    [Fact]
     public void DropSyntaxRefusal_ForAnItemWeDoHave_KeepsTheMoveQueued()
     {
         // The mirror case: if the fresh `i` DOES show the item, the syntax error

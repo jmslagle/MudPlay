@@ -104,6 +104,18 @@ public sealed class GhSweepManager : IDisposable
         @"^\s*Syntax:\s*DROP\s*\{Amount\}\s*\{Currency\}",
         RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
+    // The other face of the same problem, and the more dangerous one. The game
+    // partial-matches a drop's argument against what you're holding, so a `drop
+    // bloodstone` for bloodstones we no longer have can bind to a DIFFERENT held
+    // item — a "bloodstone orb" — and this line is the game refusing because that
+    // item happens to be undroppable. Had the collision landed on something
+    // droppable we'd have thrown away the wrong item with no complaint at all.
+    // Treated exactly like the syntax refusal: verify against a real `i` rather
+    // than retry. Confirmed live 2026-09-02.
+    private static readonly Regex DropNotAllowedRegex = new(
+        @"^\s*You may not drop that item!\s*$",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
     private const string SweepLoopName = "Roomba sweep";
 
     public enum SweepPhase { Idle, Reconning, Sorting, FinalRecon }
@@ -153,6 +165,7 @@ public sealed class GhSweepManager : IDisposable
     private readonly IDisposable _commandIgnoredSub;
     private readonly IDisposable _slowDownSub;
     private readonly WirePromptScanner? _promptScanner;
+    private readonly Func<string, bool>? _wouldAutoDiscard;
 
     private readonly DispatcherTimer _reconSearchSettle;
     private readonly DispatcherTimer _dispatchSettle;
@@ -326,7 +339,8 @@ public sealed class GhSweepManager : IDisposable
         InventoryManager? inventory = null,
         GhItemLocationStore? itemLocations = null,
         Func<RoomKey, bool>? isRoomActivelyManaged = null,
-        WirePromptScanner? promptScanner = null)
+        WirePromptScanner? promptScanner = null,
+        Func<string, bool>? wouldAutoDiscard = null)
     {
         ArgumentNullException.ThrowIfNull(labels);
         ArgumentNullException.ThrowIfNull(loopRunner);
@@ -354,6 +368,7 @@ public sealed class GhSweepManager : IDisposable
         // rooms sweep them exactly as before.
         _isRoomActivelyManaged = isRoomActivelyManaged ?? (static _ => true);
         _promptScanner = promptScanner;
+        _wouldAutoDiscard = wouldAutoDiscard;
         _log = log;
 
         _reconSearchSettle = new DispatcherTimer { Interval = ReconSearchSettle };
@@ -811,7 +826,7 @@ public sealed class GhSweepManager : IDisposable
         foreach ((RoomKey room, List<string> items) in _observedByRoom) observed[room] = items;
 
         (IReadOnlyList<GhPendingMove> moves, IReadOnlyList<GhSweepItemFound> leftInPlace) =
-            GhSortQueueBuilder.Build(observed, _labels.Labels, _itemNames);
+            GhSortQueueBuilder.Build(observed, _labels.Labels, _itemNames, _wouldAutoDiscard);
 
         foreach (GhPendingMove move in moves)
         {
@@ -1319,14 +1334,29 @@ public sealed class GhSweepManager : IDisposable
     {
         (_, string name) = CountedCommand.SplitLeadingCount(token);
         if (_tracker.State.CurrentRoom is not { } current) return;
-        if (_dispatchRoom is not { } dispatchRoom || !dispatchRoom.Equals(current.Key)) return;
+        if (_dispatchRoom is not { } dispatchRoom || !dispatchRoom.Equals(current.Key))
+        {
+            // Not our dispatch — but if something ELSE just dropped an item we
+            // believe we're carrying (auto-discard binning loot we picked up is
+            // the live case), our ledger is now wrong. Left stale, the next
+            // delivery sends a drop for an item we no longer hold, and the game
+            // partial-matches that name onto whatever else we're carrying.
+            if (isDrop) ReconcileForeignDrop(name);
+            return;
+        }
 
         PendingSortMove? match = isDrop
             ? _outstandingDispatch.FirstOrDefault(p => !p.Delivered && p.IsCarried
                                          && SameItem(p.ItemName, name))
             : _outstandingDispatch.FirstOrDefault(p => !p.Delivered && !p.IsCarried
                                          && SameItem(p.ItemName, name));
-        if (match is null) return;   // not one of ours — a manual command or another engine's
+        if (match is null)
+        {
+            // Same reasoning as above: a drop we didn't dispatch, while we happen
+            // to be mid-dispatch in this room.
+            if (isDrop) ReconcileForeignDrop(name);
+            return;
+        }
 
         if (isDrop)
         {
@@ -1381,7 +1411,7 @@ public sealed class GhSweepManager : IDisposable
     {
         if (Phase != SweepPhase.Sorting) return;
 
-        if (DropCurrencySyntaxRegex.IsMatch(line.Text))
+        if (DropCurrencySyntaxRegex.IsMatch(line.Text) || DropNotAllowedRegex.IsMatch(line.Text))
         {
             HandleDropSyntaxRefusal();
             return;
@@ -1444,6 +1474,27 @@ public sealed class GhSweepManager : IDisposable
             ClearCommandQueue();
             AdvanceAfterDispatch("drop syntax refusal");
         }
+    }
+
+    // An item left our pack without us dropping it. Whatever took it (auto-discard
+    // is the one that actually bit), we are no longer carrying it, so the move
+    // can't be delivered — and keeping it queued is worse than useless: the drop
+    // we'd eventually send names an item we don't hold, and the game resolves that
+    // name against something we DO hold. Forget it rather than re-collect it,
+    // since whatever binned it will just bin it again next lap.
+    private void ReconcileForeignDrop(string name)
+    {
+        if (Phase != SweepPhase.Sorting) return;
+        PendingSortMove? carried = _pending.FirstOrDefault(
+            p => p.IsCarried && !p.Delivered && SameItem(p.ItemName, name));
+        if (carried is null) return;
+
+        _log?.Warn(LogCategory,
+            $"{carried.ItemName} left the pack without us dropping it (auto-discard, or a manual drop) "
+            + $"— abandoning its move to {carried.To} rather than sending a drop we can't honour");
+        _leftInPlace.Add(new GhSweepItemFound(carried.From, carried.ItemName, GhLeftReason.NotActuallyCarried));
+        _pending.Remove(carried);
+        PhaseChanged?.Invoke();
     }
 
     // Post-`i` reconciliation for the above: anything we believe we're carrying

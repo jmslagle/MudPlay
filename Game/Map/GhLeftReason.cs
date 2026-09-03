@@ -19,4 +19,7 @@ public enum GhLeftReason
     // the item isn't held at all — a pickup the ledger recorded that never landed.
     // The move is a phantom, so it's removed rather than retried.
     NotActuallyCarried,
+    // Auto-discard is configured to throw this item away, so sorting it would be
+    // a tug of war: collect, get binned, find it again next lap. Left alone.
+    AutoDiscarded,
 }

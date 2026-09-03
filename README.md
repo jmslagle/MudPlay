@@ -1,7 +1,10 @@
 # MudPlay
 
 <!-- current-version:start -->
-> **Version 3.46.7**
+> **Version 3.46.9**
+> - Roomba no longer collects items auto-discard is set to throw away — the two were fighting over the same loot every lap
+> - If anything else empties your hands mid-sweep (auto-discard, a manual drop), Roomba forgets the item instead of planning a delivery for something it no longer holds. This mattered: the game matches a drop's name against what you actually carry, so a drop for a missing item could latch onto a different item you still had
+> - `You may not drop that item!` now triggers the same inventory check as the currency-syntax refusal
 > - A Roomba drop the game refuses with its currency-syntax complaint now triggers an inventory check: if the item genuinely isn't held the move is discarded instead of being retried every lap
 > - Roomba sends its get/drop commands one per game prompt instead of dumping a whole room's batch at once, which was tripping the game's command-rate limit and getting the entire batch — plus the move that followed it — silently dropped
 > - A command the game reports as dropped is re-sent after a short back-off rather than lost

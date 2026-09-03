@@ -805,6 +805,14 @@ A `get <item>` that can't succeed replies with one of two shapes:
   **braces**, where the get form uses brackets. Same shape otherwise: no item name is echoed, and it
   means the game didn't recognise the name as something you're holding — usually because you aren't.
   A `You may not drop that item!` line is a *different* refusal (the item is held but undroppable).
+- **Drop arguments are PARTIAL-MATCHED against what you hold** *([CONFIRMED] 2026-09-02, user)*. This
+  is the dangerous one. Observed: bloodstones were auto-discarded, and a later `drop bloodstone`
+  bound to a **`bloodstone orb`** still in the pack — the game answered `You may not drop that item!`
+  because the orb is undroppable. **Had the collision landed on something droppable, the wrong item
+  would have been dropped with no complaint at all.** So a drop for an item you may no longer hold is
+  never safe to send blind: confirm you hold it, or be ready to treat any refusal as "verify against
+  a real `i` before doing anything else". Roomba does the latter, and also drops its belief in a
+  carried item the moment anything else is seen dropping it.
 - **`You cannot carry that much!`** — a **capacity refusal**: the item is on the floor and gettable,
   but taking it would exceed the carry limit. The item is NOT gone (unlike the two above) — it's a
   transient block that clears once weight is shed. No item name is echoed. (Confirmed by screenshot:

@@ -12,10 +12,17 @@ namespace MudPlay.Game.Map;
 // what's labeled, and decides what moves where.
 public static class GhSortQueueBuilder
 {
+    // wouldAutoDiscard: true for an item the auto-discard engine is configured to
+    // throw away. Those are skipped outright — collecting one means Roomba carries
+    // it, auto-discard bins it mid-sweep, and next lap Roomba finds it on the floor
+    // and collects it again. Worse, the binning leaves Roomba believing it still
+    // holds the item, and the drop it later sends gets partial-matched by the game
+    // onto a DIFFERENT held item. Not fighting over them at all is the fix.
     public static (IReadOnlyList<GhPendingMove> Moves, IReadOnlyList<GhSweepItemFound> LeftInPlace) Build(
         IReadOnlyDictionary<RoomKey, IReadOnlyList<string>> observedByRoom,
         IReadOnlyCollection<GhRoomLabel> labels,
-        ItemNameStore itemNames)
+        ItemNameStore itemNames,
+        Func<string, bool>? wouldAutoDiscard = null)
     {
         List<GhPendingMove> moves = new();
         List<GhSweepItemFound> leftInPlace = new();
@@ -40,6 +47,12 @@ public static class GhSortQueueBuilder
                 if (GhItemClassifier.IsGuardEmblem(entry))
                 {
                     leftInPlace.Add(new GhSweepItemFound(room, entry, GhLeftReason.NoMatchingRoom));
+                    continue;
+                }
+
+                if (wouldAutoDiscard?.Invoke(entry) == true)
+                {
+                    leftInPlace.Add(new GhSweepItemFound(room, entry, GhLeftReason.AutoDiscarded));
                     continue;
                 }
 

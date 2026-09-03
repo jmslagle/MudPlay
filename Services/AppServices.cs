@@ -5311,7 +5311,13 @@ public sealed class AppServices
             // Meters the get/drop batch: one command per prompt, so a room full of
             // items can't outrun the game's command-rate limit and have the whole
             // batch — plus the loop's next move — silently dropped.
-            promptScanner: PromptScanner);
+            promptScanner: PromptScanner,
+            // Don't sort what auto-discard is going to bin. Reads the same
+            // resolver auto-discard itself uses, and the same enable flag, so the
+            // two engines can't disagree about which items are junk.
+            wouldAutoDiscard: entry =>
+                ReadAutoModeFlag(d => d.AutoGetItems)
+                && ResolveAutoDiscardItem(entry) is { Discard: true, KeepCount: 0 });
 
         // A manually-typed movement step (one the walker / loop / auto-lair didn't
         // send — RoomTracker's echo-claim tells them apart) pauses the active nav
