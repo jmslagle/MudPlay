@@ -1,5 +1,9 @@
 # Version history
 
+## 3.46.7
+
+- A Roomba drop the game refuses with its currency-syntax complaint now triggers an inventory check: if the item genuinely isn't held the move is discarded instead of being retried every lap
+
 ## 3.46.6
 
 - Roomba sends its get/drop commands one per game prompt instead of dumping a whole room's batch at once, which was tripping the game's command-rate limit and getting the entire batch — plus the move that followed it — silently dropped

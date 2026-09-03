@@ -92,6 +92,18 @@ public sealed class GhSweepManager : IDisposable
         @"^\s*You cannot carry that much!\s*$",
         RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
+    // The DROP counterpart of the currency misparse — note the BRACES, where the
+    // get form uses brackets. Names no item, exactly like the get form, but with
+    // dispatch paced one command per prompt there is only ever one drop in flight,
+    // so the failure attributes unambiguously to the command just sent.
+    //
+    // It means the game didn't recognise the name as something we're holding, so
+    // the usual cause is that we aren't holding it — the ledger believes a pickup
+    // landed that actually didn't. Confirmed live 2026-09-02.
+    private static readonly Regex DropCurrencySyntaxRegex = new(
+        @"^\s*Syntax:\s*DROP\s*\{Amount\}\s*\{Currency\}",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
     private const string SweepLoopName = "Roomba sweep";
 
     public enum SweepPhase { Idle, Reconning, Sorting, FinalRecon }
@@ -186,6 +198,11 @@ public sealed class GhSweepManager : IDisposable
     // the ledger has provably drifted (we thought an item fit and it didn't).
     private bool _awaitingInventoryResync;
     private bool _resyncPending;
+
+    // Set when the resync was triggered by a drop the game didn't recognise: the
+    // fresh `i` is being read to find moves we only THINK we're carrying, not just
+    // to correct the weight baseline.
+    private bool _verifyCarriedAfterResync;
 
     // Baseline captured at sort start (and corrected on a resync): base = the
     // player's gear+pack weight carrying zero Roomba pickups; max = MaxWeight.
@@ -451,6 +468,7 @@ public sealed class GhSweepManager : IDisposable
         _inventorySettle.Stop();
         _awaitingInventoryResync = false;
         _resyncPending = false;
+        _verifyCarriedAfterResync = false;
         _baseCarryWeight = 0;
         _maxCarryWeight = int.MaxValue;
 
@@ -1362,6 +1380,13 @@ public sealed class GhSweepManager : IDisposable
     private void OnLineForGetFailure(LineExtractor.EmittedLine line)
     {
         if (Phase != SweepPhase.Sorting) return;
+
+        if (DropCurrencySyntaxRegex.IsMatch(line.Text))
+        {
+            HandleDropSyntaxRefusal();
+            return;
+        }
+
         List<PendingSortMove> gets = _outstandingDispatch
             .Where(m => !m.IsCarried && !m.Delivered).ToList();
         if (gets.Count == 0) return;
@@ -1392,6 +1417,55 @@ public sealed class GhSweepManager : IDisposable
         // single get is outstanding; retrying the same name can't help either way.
         if (GetCurrencySyntaxRegex.IsMatch(line.Text) && gets.Count == 1)
             StrandFailedGet(gets[0], "game misparsed the get as a currency command");
+    }
+
+    // The game didn't recognise our drop's item name, which almost always means we
+    // aren't holding it — a pickup the ledger recorded that never actually landed
+    // (a flooded `get`, say). Don't take that on trust: ask for a real `i` and let
+    // OnFullInventoryParsed drop only the moves the inventory genuinely doesn't
+    // show. Retrying is pointless either way, so the command stops here.
+    private void HandleDropSyntaxRefusal()
+    {
+        List<PendingSortMove> drops = _outstandingDispatch
+            .Where(m => m.IsCarried && !m.Delivered).ToList();
+        if (drops.Count == 0) return;
+
+        foreach (PendingSortMove drop in drops) _outstandingDispatch.Remove(drop);
+        _verifyCarriedAfterResync = true;
+        _resyncPending = true;
+        _log?.Warn(LogCategory,
+            $"game misparsed a drop as a currency command at {_dispatchRoom} "
+            + $"({drops.Count} outstanding) — verifying against a fresh inventory");
+        PhaseChanged?.Invoke();
+        if (_outstandingDispatch.Count == 0)
+        {
+            _dispatchSettle.Stop();
+            _dispatchRoom = null;
+            ClearCommandQueue();
+            AdvanceAfterDispatch("drop syntax refusal");
+        }
+    }
+
+    // Post-`i` reconciliation for the above: anything we believe we're carrying
+    // that the real inventory doesn't list was never picked up, so the move is a
+    // phantom. Remove it outright — leaving it queued means dispatching a drop
+    // that can only ever fail again.
+    private void DropPhantomCarriedMoves()
+    {
+        if (_inventory is null) return;
+        IReadOnlyList<string> carried = _inventory.Snapshot.CarriedItems;
+
+        foreach (PendingSortMove move in _pending
+                     .Where(p => p.IsCarried && !p.Delivered).ToList())
+        {
+            if (carried.Any(entry => SameItem(move.ItemName, entry))) continue;
+
+            _log?.Warn(LogCategory,
+                $"{move.ItemName} isn't in inventory despite a recorded pickup from {move.From} "
+                + "— dropping the phantom move rather than retrying a drop that can't work");
+            _leftInPlace.Add(new GhSweepItemFound(move.From, move.ItemName, GhLeftReason.NotActuallyCarried));
+            _pending.Remove(move);
+        }
     }
 
     // "You cannot carry that much!" — abort the outstanding pickups (they stay
@@ -1462,6 +1536,11 @@ public sealed class GhSweepManager : IDisposable
         if (!_awaitingInventoryResync || Phase != SweepPhase.Sorting) return;
         _inventorySettle.Stop();
         _awaitingInventoryResync = false;
+        if (_verifyCarriedAfterResync)
+        {
+            _verifyCarriedAfterResync = false;
+            DropPhantomCarriedMoves();
+        }
         ResyncCarryBaseline();
         // A corrected (smaller) budget can require finer stack splitting and can
         // reveal a single unit is now unmovable.

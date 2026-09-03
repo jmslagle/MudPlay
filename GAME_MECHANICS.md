@@ -801,6 +801,10 @@ A `get <item>` that can't succeed replies with one of two shapes:
 - **`Syntax: GET [Amount] [Currency]`** — the game misparsed the item name as a **currency** get
   (observed for some multi-word names, e.g. `get silk cape`). No item name is echoed. Retrying the
   same name can't help.
+- **`Syntax: DROP {Amount} {Currency}`** — the **drop** counterpart, confirmed 2026-09-02. Note the
+  **braces**, where the get form uses brackets. Same shape otherwise: no item name is echoed, and it
+  means the game didn't recognise the name as something you're holding — usually because you aren't.
+  A `You may not drop that item!` line is a *different* refusal (the item is held but undroppable).
 - **`You cannot carry that much!`** — a **capacity refusal**: the item is on the floor and gettable,
   but taking it would exceed the carry limit. The item is NOT gone (unlike the two above) — it's a
   transient block that clears once weight is shed. No item name is echoed. (Confirmed by screenshot:

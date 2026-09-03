@@ -15,4 +15,8 @@ public enum GhLeftReason
     // refused the drop as full. Requeueing it would just retry the same wall, so
     // it waits for the next sweep, by which time the rooms may have space.
     AllDestinationsFull,
+    // A drop was refused with the currency-syntax misparse and a fresh `i` showed
+    // the item isn't held at all — a pickup the ledger recorded that never landed.
+    // The move is a phantom, so it's removed rather than retried.
+    NotActuallyCarried,
 }
