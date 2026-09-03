@@ -1,7 +1,10 @@
 # MudPlay
 
 <!-- current-version:start -->
-> **Version 3.46.10**
+> **Version 3.47.0**
+> - An interrupted sweep no longer dumps its load on you: whatever Roomba was still carrying is remembered per character and delivered by the next sweep, verified against a real inventory read first so anything you dealt with by hand is dropped from the list
+> - New **Resume** button on the Roomba tab — carries on from a stopped sweep's queue without re-walking the whole circuit to rediscover what it already found
+> - The manifest survives an app restart or a relog, so it can't be defeated by whatever ended the sweep
 > - Roomba stops collecting once the pack passes 80% of its carry budget and empties down below 40% before filling again, heaviest destination first. A saturated pack used to alternate deliver-one / collect-one and walk the same long leg twice for every single item while carrying dozens it never delivered
 > - Roomba no longer collects items auto-discard is set to throw away — the two were fighting over the same loot every lap
 > - If anything else empties your hands mid-sweep (auto-discard, a manual drop), Roomba forgets the item instead of planning a delivery for something it no longer holds. This mattered: the game matches a drop's name against what you actually carry, so a drop for a missing item could latch onto a different item you still had

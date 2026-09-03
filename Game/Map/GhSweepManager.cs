@@ -166,6 +166,13 @@ public sealed class GhSweepManager : IDisposable
     private readonly IDisposable _slowDownSub;
     private readonly WirePromptScanner? _promptScanner;
     private readonly Func<string, bool>? _wouldAutoDiscard;
+    private readonly GhCarryManifestStore? _carryManifest;
+
+    // The unfinished sort queue from a sweep that stopped early, kept in memory so
+    // Resume can carry on from it. Survives ResetToIdle deliberately — it's the
+    // one piece of a dead sweep still worth something. Cleared by a fresh Start,
+    // since that re-scans anyway.
+    private List<PendingSortMove>? _suspended;
 
     private readonly DispatcherTimer _reconSearchSettle;
     private readonly DispatcherTimer _dispatchSettle;
@@ -345,7 +352,8 @@ public sealed class GhSweepManager : IDisposable
         GhItemLocationStore? itemLocations = null,
         Func<RoomKey, bool>? isRoomActivelyManaged = null,
         WirePromptScanner? promptScanner = null,
-        Func<string, bool>? wouldAutoDiscard = null)
+        Func<string, bool>? wouldAutoDiscard = null,
+        GhCarryManifestStore? carryManifest = null)
     {
         ArgumentNullException.ThrowIfNull(labels);
         ArgumentNullException.ThrowIfNull(loopRunner);
@@ -374,6 +382,7 @@ public sealed class GhSweepManager : IDisposable
         _isRoomActivelyManaged = isRoomActivelyManaged ?? (static _ => true);
         _promptScanner = promptScanner;
         _wouldAutoDiscard = wouldAutoDiscard;
+        _carryManifest = carryManifest;
         _log = log;
 
         _reconSearchSettle = new DispatcherTimer { Interval = ReconSearchSettle };
@@ -431,16 +440,18 @@ public sealed class GhSweepManager : IDisposable
     // (LoopRunner's own ≥2-waypoint cycle requirement), another sweep is
     // already running, or another movement engine (walk / loop / auto-lair)
     // is active.
-    public bool Start(SweepMode mode = SweepMode.Sort)
+    // Shared Start / Resume preconditions. Both put the same engine on the wire,
+    // so both refuse for the same reasons and report them the same way.
+    private bool TryClaimSweepStart(out int manageable)
     {
-        LastStartError = null;
+        manageable = 0;
         if (Phase != SweepPhase.Idle)
         {
             LastStartError = "A sweep is already running.";
             _log?.Warn(LogCategory, "start refused: a sweep is already running");
             return false;
         }
-        int manageable = _labels.Labels.Count(l => _isRoomActivelyManaged(new RoomKey(l.Map, l.Room)));
+        manageable = _labels.Labels.Count(l => _isRoomActivelyManaged(new RoomKey(l.Map, l.Room)));
         if (manageable < 2)
         {
             LastStartError = manageable == 0
@@ -456,9 +467,13 @@ public sealed class GhSweepManager : IDisposable
             _log?.Warn(LogCategory, "start refused: another movement engine is active");
             return false;
         }
+        return true;
+    }
 
-        Mode = mode;
-        StartedAt = DateTimeOffset.Now;
+    // Everything a run owns, wiped back to its pre-sweep state. Shared by Start
+    // and Resume; Resume then re-seeds the queue it kept.
+    private void ResetSweepState()
+    {
         _observedByRoom.Clear();
         _visibleByRoom.Clear();
         _hiddenByRoom.Clear();
@@ -493,6 +508,74 @@ public sealed class GhSweepManager : IDisposable
         _baseCarryWeight = 0;
         _maxCarryWeight = int.MaxValue;
 
+    }
+
+    // Work left over from a sweep that stopped early — what Resume would pick up.
+    public int ResumableMoveCount => _suspended?.Count ?? 0;
+    public bool CanResume => _suspended is { Count: > 0 } && Phase == SweepPhase.Idle;
+
+    // Carry on from where a stopped sweep left off, skipping recon entirely. The
+    // survey a sweep dies holding is still good, and re-walking a 120-room circuit
+    // to rediscover what we already knew is most of the cost of a sweep.
+    //
+    // Deliberately keeps the old queue rather than re-deriving it: items already
+    // delivered are gone from it, so a re-derived plan would send us back to
+    // collect things we'd already moved. Anything that HAS changed underneath us
+    // (someone else took an item) surfaces the same way it always does — the get
+    // fails and that move is dropped.
+    public bool Resume()
+    {
+        LastStartError = null;
+        if (_suspended is not { Count: > 0 } resumable)
+        {
+            LastStartError = "There's no unfinished sweep to resume.";
+            return false;
+        }
+        if (!TryClaimSweepStart(out int _)) return false;
+
+        Mode = SweepMode.Sort;
+        StartedAt = DateTimeOffset.Now;
+        List<PendingSortMove> restored = resumable;
+        _suspended = null;
+        ResetSweepState();
+        _pending.AddRange(restored);
+
+        if (!PlotAndStartCircuit())
+        {
+            // Put it back — a route we can't plot right now (mid-combat, position
+            // unknown) is worth retrying once the player sorts that out.
+            _suspended = restored;
+            _pending.Clear();
+            LastStartError = "Couldn't plot a walkable route through the labeled rooms.";
+            _log?.Warn(LogCategory, "resume refused: LoopRunner declined the sweep circuit");
+            return false;
+        }
+
+        Phase = SweepPhase.Sorting;
+        CaptureCarryBaseline();
+        SplitOversizedMoves();
+        StrandUnmovableItems();
+        // The in-memory queue we just restored supersedes the persisted manifest —
+        // it's the same items plus everything still to collect. Clear it so a later
+        // Start can't adopt the carried half a second time.
+        _carryManifest?.Clear();
+
+        _log?.Info(LogCategory,
+            $"sweep resumed: {_pending.Count} move(s) carried over, recon skipped");
+        PhaseChanged?.Invoke();
+        if (_pending.Count == 0) FinishSweep();
+        return true;
+    }
+
+    public bool Start(SweepMode mode = SweepMode.Sort)
+    {
+        LastStartError = null;
+        if (!TryClaimSweepStart(out int manageable)) return false;
+
+        Mode = mode;
+        StartedAt = DateTimeOffset.Now;
+        _suspended = null;   // a fresh start re-scans, so the old queue is moot
+        ResetSweepState();
         if (!PlotAndStartCircuit())
         {
             LastStartError = "Couldn't plot a walkable route through the labeled rooms.";
@@ -661,9 +744,24 @@ public sealed class GhSweepManager : IDisposable
     // completion) so none of them can silently drop what's currently carried.
     private GhSweepReport BuildFinalReport()
     {
+        // Hold the unfinished queue so Resume can pick it up without re-walking
+        // the whole circuit. Recon is by far the most expensive part of a sweep —
+        // a 120-room house is minutes of walking — and an abort throws away a
+        // survey that is still perfectly good.
+        _suspended = _pending.Where(p => !p.Delivered).ToList();
+        if (_suspended.Count == 0) _suspended = null;
+
         List<PendingSortMove> stillCarried = _pending.Where(p => p.IsCarried && !p.Delivered).ToList();
         foreach (PendingSortMove move in stillCarried)
             _stranded.Add(new GhSweepStranded(move.From, move.To, move.ItemName));
+
+        // Hand the load forward. Whatever ended this sweep, the items are still in
+        // the player's pack and only this queue knows where each was going —
+        // without the manifest they'd be left to sort a couple of dozen items by
+        // hand. Always written, including empty, so a clean finish clears a
+        // previous sweep's record rather than leaving it to be re-delivered.
+        _carryManifest?.Save(stillCarried.Select(m =>
+            new GhCarriedItem($"{m.From.Map}/{m.From.Room}", $"{m.To.Map}/{m.To.Room}", m.ItemName, m.Count)));
 
         if (stillCarried.Count > 0)
         {
@@ -850,6 +948,64 @@ public sealed class GhSweepManager : IDisposable
                 + (requiresSearch ? " (hidden)" : string.Empty));
         }
         _leftInPlace.AddRange(leftInPlace);
+        RestoreCarriedManifest();
+    }
+
+    // Re-adopt what a previous sweep left in the pack. These enter already
+    // IsCarried, so the planner treats them as deliveries owed — with the unload
+    // hysteresis that means a pack still full from last time is emptied before
+    // anything new is collected, which is the behaviour we want anyway.
+    //
+    // The manifest is a record, not a fact: the player may have dropped, sold or
+    // worn any of it in between. So a restored move is queued only when a fresh
+    // inventory read still shows the item. Without live inventory data we adopt
+    // nothing rather than guess — a phantom carried move sends a drop the game
+    // partial-matches onto some other item we really are holding.
+    private void RestoreCarriedManifest()
+    {
+        if (_carryManifest is null) return;
+        IReadOnlyList<GhCarriedItem> manifest = _carryManifest.Load();
+        if (manifest.Count == 0) return;
+
+        if (_inventory is null || !_inventory.IsLoaded)
+        {
+            _log?.Warn(LogCategory,
+                $"{manifest.Count} item(s) remembered from the last sweep, but inventory hasn't been read "
+                + "— not adopting them rather than risk delivering something we aren't holding");
+            return;
+        }
+
+        IReadOnlyList<string> carried = _inventory.Snapshot.CarriedItems;
+        int adopted = 0, gone = 0;
+        foreach (GhCarriedItem entry in manifest)
+        {
+            if (entry.Item is not { Length: > 0 } name
+                || ParseRoom(entry.From) is not { } from
+                || ParseRoom(entry.To) is not { } to) continue;
+
+            if (!carried.Any(held => SameItem(name, held))) { gone++; continue; }
+
+            _pending.Add(new PendingSortMove
+            {
+                From = from,
+                To = to,
+                ItemName = name,
+                Count = Math.Max(1, entry.Count),
+                RequiresSearch = false,
+                IsCarried = true,
+            });
+            adopted++;
+        }
+
+        _log?.Info(LogCategory,
+            $"resuming {adopted} item(s) still carried from the last sweep"
+            + (gone > 0 ? $"; {gone} no longer in the pack and dropped from the manifest" : string.Empty));
+    }
+
+    private static RoomKey? ParseRoom(string? coordinate)
+    {
+        (int? map, int? room) = RoomSearchService.TryParseCoordinate(coordinate ?? string.Empty);
+        return map is int m && room is int r ? new RoomKey(m, r) : null;
     }
 
     // Recon capture. An arrival description is staged while RoomTracker still

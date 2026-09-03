@@ -1599,6 +1599,11 @@ public sealed class AppServices
     // labels stay per-BBS above. See GhManagedRoomStore.
     public Game.Map.GhManagedRoomStore GhManagedRooms { get; private set; } = null!;
 
+    // What the last Roomba sweep was still carrying when it stopped. Persisted
+    // per character so an interrupted sweep's load is delivered by the next one
+    // instead of being left in the player's pack to sort by hand.
+    public Game.Map.GhCarryManifestStore GhCarryManifest { get; private set; } = null!;
+
     // Per-BBS "last seen this item in this room" log, fed by GhSweep and read by
     // RoombaQuery's @roomba handler.
     public Game.Map.GhItemLocationStore GhItemLocations { get; private set; } = null!;
@@ -2839,6 +2844,7 @@ public sealed class AppServices
         // Loaded/reloaded via OnBbsPinApplied, same pattern as RoomBlacklist.
         GhRoomLabels = new Game.Map.GhRoomLabelStore(Profile, Log);
         GhManagedRooms = new Game.Map.GhManagedRoomStore(Profile, Log);
+        GhCarryManifest = new Game.Map.GhCarryManifestStore(Profile, Log);
         GhItemLocations = new Game.Map.GhItemLocationStore(ItemNames, Log);
         Profile.ProfileLoaded += _ => GhRoomLabels.OnBbsPinApplied(ResolveActiveBbs()?.Name);
         Profile.BbsPinApplied += _ => GhRoomLabels.OnBbsPinApplied(ResolveActiveBbs()?.Name);
@@ -5317,7 +5323,11 @@ public sealed class AppServices
             // two engines can't disagree about which items are junk.
             wouldAutoDiscard: entry =>
                 ReadAutoModeFlag(d => d.AutoGetItems)
-                && ResolveAutoDiscardItem(entry) is { Discard: true, KeepCount: 0 });
+                && ResolveAutoDiscardItem(entry) is { Discard: true, KeepCount: 0 },
+            // Carries an interrupted sweep's load forward: whatever ends a sweep,
+            // the items are still in the pack and only its queue knew where each
+            // was going, so the next sweep re-adopts and delivers them.
+            carryManifest: GhCarryManifest);
 
         // A manually-typed movement step (one the walker / loop / auto-lair didn't
         // send — RoomTracker's echo-claim tells them apart) pauses the active nav

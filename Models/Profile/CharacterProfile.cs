@@ -190,6 +190,15 @@ public sealed class CharacterProfile
     // GhManagedRoomStore; null or empty = this character manages nothing yet.
     public List<string>? GhManagedRooms { get; set; }
 
+    // Items a Roomba sweep was still carrying when it ended — the sweep's own
+    // record of what it owes you. Persisted because an aborted sweep otherwise
+    // leaves its load in your pack with only the sweep (now gone) knowing where
+    // any of it was headed, so you're left sorting it by hand. Restored and
+    // verified against a real inventory read at the next sweep, which delivers it
+    // before reconning. Maintained by GhCarryManifestStore; null or empty = the
+    // last sweep finished with empty hands, which is the normal case.
+    public List<GhCarriedItem>? GhCarriedItems { get; set; }
+
     // Recent walk-to destinations, newest first, capped at 10. Each entry is a
     // "map/room" coordinate string. Maintained by GotoHistoryStore; drives the
     // Navigation goto-button dropdown. null or empty = no history yet.
