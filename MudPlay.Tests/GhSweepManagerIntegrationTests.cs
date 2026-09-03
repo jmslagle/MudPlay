@@ -1037,6 +1037,40 @@ public sealed class GhSweepManagerIntegrationTests : IDisposable
     }
 
     [Fact]
+    public void ResumeSurvivesARestart_FromThePersistedQueue()
+    {
+        // The case that matters most: a client restart after a bail is exactly
+        // when re-walking a 120-room circuit hurts, and it's the one an
+        // in-memory-only queue can't survive. A brand-new manager (no memory of
+        // the sweep at all) must still be able to resume from the profile.
+        ProfileService profile = new();
+        profile.LoadBlank();
+        GhSuspendedSweepStore store = new(profile);
+        store.Save(new[]
+        {
+            new GhSuspendedMove("1/3", "1/1", "war hammer", 1, carried: false, hidden: false),
+            new GhSuspendedMove("1/3", "1/1", "mace", 2, carried: true, hidden: false),
+        });
+
+        SweepHarness h = NewSweepHarness(_root, _scratchBbs, store);
+
+        Assert.True(h.Sweep.CanResume);
+        Assert.Equal(2, h.Sweep.ResumableMoveCount);
+
+        h.Tracker.SetLocated(new RoomKey(1, 1));
+        Assert.True(h.Sweep.Resume());
+
+        Assert.Equal(GhSweepManager.SweepPhase.Sorting, h.Sweep.Phase);
+        Assert.Equal(2, h.Sweep.PendingMoveCount);
+        Assert.Equal(1, h.Sweep.CarriedPendingCount);   // the carried flag round-tripped
+        Assert.DoesNotContain(h.Sent, c => c == "sea");
+        // Consumed: a later Start mustn't adopt the same carried item again.
+        Assert.False(store.Any);
+
+        h.Dispose();
+    }
+
+    [Fact]
     public void CleanlyFinishedSweep_HasNothingToResume()
     {
         SweepHarness h = NewSweepHarness(_root, _scratchBbs);
@@ -1210,7 +1244,8 @@ public sealed class GhSweepManagerIntegrationTests : IDisposable
         }
     }
 
-    private static SweepHarness NewSweepHarness(string root, string scratchBbs)
+    private static SweepHarness NewSweepHarness(string root, string scratchBbs,
+        GhSuspendedSweepStore? suspended = null)
     {
         Directory.CreateDirectory(Path.Combine(root, "alpha"));
         File.WriteAllText(Path.Combine(root, "alpha", "Rooms.json"), """
@@ -1269,7 +1304,7 @@ public sealed class GhSweepManagerIntegrationTests : IDisposable
             postToUi: action => action());
         sweep = new GhSweepManager(labels, runner, tracker, bfs, ground, names,
             router, coordinator, isOtherEngineBusy: () => false,
-            isParadigm: () => true, inventory: inventory);
+            isParadigm: () => true, inventory: inventory, suspendedStore: suspended);
 
         List<string> sent = new();
         sweep.SetWireSender(b => sent.Add(Encoding.Latin1.GetString(b).TrimEnd('\r')));

@@ -1599,10 +1599,10 @@ public sealed class AppServices
     // labels stay per-BBS above. See GhManagedRoomStore.
     public Game.Map.GhManagedRoomStore GhManagedRooms { get; private set; } = null!;
 
-    // What the last Roomba sweep was still carrying when it stopped. Persisted
-    // per character so an interrupted sweep's load is delivered by the next one
-    // instead of being left in the player's pack to sort by hand.
-    public Game.Map.GhCarryManifestStore GhCarryManifest { get; private set; } = null!;
+    // What the last Roomba sweep still had to do when it stopped. Persisted per
+    // character so its load is delivered by the next sweep instead of being left
+    // in the player's pack, and so Resume can skip the scan even after a restart.
+    public Game.Map.GhSuspendedSweepStore GhSuspendedSweep { get; private set; } = null!;
 
     // Per-BBS "last seen this item in this room" log, fed by GhSweep and read by
     // RoombaQuery's @roomba handler.
@@ -2844,7 +2844,7 @@ public sealed class AppServices
         // Loaded/reloaded via OnBbsPinApplied, same pattern as RoomBlacklist.
         GhRoomLabels = new Game.Map.GhRoomLabelStore(Profile, Log);
         GhManagedRooms = new Game.Map.GhManagedRoomStore(Profile, Log);
-        GhCarryManifest = new Game.Map.GhCarryManifestStore(Profile, Log);
+        GhSuspendedSweep = new Game.Map.GhSuspendedSweepStore(Profile, Log);
         GhItemLocations = new Game.Map.GhItemLocationStore(ItemNames, Log);
         Profile.ProfileLoaded += _ => GhRoomLabels.OnBbsPinApplied(ResolveActiveBbs()?.Name);
         Profile.BbsPinApplied += _ => GhRoomLabels.OnBbsPinApplied(ResolveActiveBbs()?.Name);
@@ -5324,10 +5324,10 @@ public sealed class AppServices
             wouldAutoDiscard: entry =>
                 ReadAutoModeFlag(d => d.AutoGetItems)
                 && ResolveAutoDiscardItem(entry) is { Discard: true, KeepCount: 0 },
-            // Carries an interrupted sweep's load forward: whatever ends a sweep,
-            // the items are still in the pack and only its queue knew where each
-            // was going, so the next sweep re-adopts and delivers them.
-            carryManifest: GhCarryManifest);
+            // Carries an interrupted sweep forward: the items it was holding are
+            // still in the pack with only its queue knowing where each belonged,
+            // and its remaining plan is a full lap of the circuit to rebuild.
+            suspendedStore: GhSuspendedSweep);
 
         // A manually-typed movement step (one the walker / loop / auto-lair didn't
         // send — RoomTracker's echo-claim tells them apart) pauses the active nav

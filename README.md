@@ -3,7 +3,7 @@
 <!-- current-version:start -->
 > **Version 3.47.0**
 > - An interrupted sweep no longer dumps its load on you: whatever Roomba was still carrying is remembered per character and delivered by the next sweep, verified against a real inventory read first so anything you dealt with by hand is dropped from the list
-> - New **Resume** button on the Roomba tab — carries on from a stopped sweep's queue without re-walking the whole circuit to rediscover what it already found
+> - New **Resume** button on the Roomba tab — carries on from a stopped sweep's queue without re-walking the whole circuit to rediscover what it already found. It's always visible and greys out when there's nothing to resume, and the queue is saved per character so it survives closing the client
 > - The manifest survives an app restart or a relog, so it can't be defeated by whatever ended the sweep
 > - Roomba stops collecting once the pack passes 80% of its carry budget and empties down below 40% before filling again, heaviest destination first. A saturated pack used to alternate deliver-one / collect-one and walk the same long leg twice for every single item while carrying dozens it never delivered
 > - Roomba no longer collects items auto-discard is set to throw away — the two were fighting over the same loot every lap

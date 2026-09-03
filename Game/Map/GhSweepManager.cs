@@ -166,7 +166,7 @@ public sealed class GhSweepManager : IDisposable
     private readonly IDisposable _slowDownSub;
     private readonly WirePromptScanner? _promptScanner;
     private readonly Func<string, bool>? _wouldAutoDiscard;
-    private readonly GhCarryManifestStore? _carryManifest;
+    private readonly GhSuspendedSweepStore? _suspendedStore;
 
     // The unfinished sort queue from a sweep that stopped early, kept in memory so
     // Resume can carry on from it. Survives ResetToIdle deliberately — it's the
@@ -353,7 +353,7 @@ public sealed class GhSweepManager : IDisposable
         Func<RoomKey, bool>? isRoomActivelyManaged = null,
         WirePromptScanner? promptScanner = null,
         Func<string, bool>? wouldAutoDiscard = null,
-        GhCarryManifestStore? carryManifest = null)
+        GhSuspendedSweepStore? suspendedStore = null)
     {
         ArgumentNullException.ThrowIfNull(labels);
         ArgumentNullException.ThrowIfNull(loopRunner);
@@ -382,7 +382,7 @@ public sealed class GhSweepManager : IDisposable
         _isRoomActivelyManaged = isRoomActivelyManaged ?? (static _ => true);
         _promptScanner = promptScanner;
         _wouldAutoDiscard = wouldAutoDiscard;
-        _carryManifest = carryManifest;
+        _suspendedStore = suspendedStore;
         _log = log;
 
         _reconSearchSettle = new DispatcherTimer { Interval = ReconSearchSettle };
@@ -511,8 +511,14 @@ public sealed class GhSweepManager : IDisposable
     }
 
     // Work left over from a sweep that stopped early — what Resume would pick up.
-    public int ResumableMoveCount => _suspended?.Count ?? 0;
-    public bool CanResume => _suspended is { Count: > 0 } && Phase == SweepPhase.Idle;
+    // Falls back to the persisted record when there's nothing in memory, which is
+    // the case that matters most: a client restart after a bail is exactly when
+    // re-walking a 120-room circuit hurts, and it's the one an in-memory-only
+    // queue can't survive.
+    public int ResumableMoveCount
+        => _suspended?.Count ?? _suspendedStore?.Load().Count ?? 0;
+
+    public bool CanResume => Phase == SweepPhase.Idle && ResumableMoveCount > 0;
 
     // Carry on from where a stopped sweep left off, skipping recon entirely. The
     // survey a sweep dies holding is still good, and re-walking a 120-room circuit
@@ -526,7 +532,10 @@ public sealed class GhSweepManager : IDisposable
     public bool Resume()
     {
         LastStartError = null;
-        if (_suspended is not { Count: > 0 } resumable)
+        // In-memory first (same session), else rehydrate the persisted record —
+        // that's the path a client restart takes.
+        List<PendingSortMove>? resumable = _suspended ?? RehydrateSuspended();
+        if (resumable is not { Count: > 0 })
         {
             LastStartError = "There's no unfinished sweep to resume.";
             return false;
@@ -555,10 +564,10 @@ public sealed class GhSweepManager : IDisposable
         CaptureCarryBaseline();
         SplitOversizedMoves();
         StrandUnmovableItems();
-        // The in-memory queue we just restored supersedes the persisted manifest —
-        // it's the same items plus everything still to collect. Clear it so a later
-        // Start can't adopt the carried half a second time.
-        _carryManifest?.Clear();
+        // The live queue now owns this work; the persisted copy would otherwise let
+        // a later Start adopt the carried half a second time. It's rewritten at the
+        // next sweep end either way.
+        _suspendedStore?.Clear();
 
         _log?.Info(LogCategory,
             $"sweep resumed: {_pending.Count} move(s) carried over, recon skipped");
@@ -755,13 +764,16 @@ public sealed class GhSweepManager : IDisposable
         foreach (PendingSortMove move in stillCarried)
             _stranded.Add(new GhSweepStranded(move.From, move.To, move.ItemName));
 
-        // Hand the load forward. Whatever ended this sweep, the items are still in
-        // the player's pack and only this queue knows where each was going —
-        // without the manifest they'd be left to sort a couple of dozen items by
-        // hand. Always written, including empty, so a clean finish clears a
-        // previous sweep's record rather than leaving it to be re-delivered.
-        _carryManifest?.Save(stillCarried.Select(m =>
-            new GhCarriedItem($"{m.From.Map}/{m.From.Room}", $"{m.To.Map}/{m.To.Room}", m.ItemName, m.Count)));
+        // Hand the whole unfinished queue forward, not just the carried half.
+        // Whatever ended this sweep, the items in the pack are still there and only
+        // this queue knows where each was going; and the planned-but-uncollected
+        // moves are a full lap of the circuit to rediscover. Persisting both is
+        // what lets Resume skip the scan even after the client restarts. Always
+        // written, including empty, so a clean finish clears the last record
+        // rather than leaving it to be re-delivered forever.
+        _suspendedStore?.Save((_suspended ?? new List<PendingSortMove>()).Select(m =>
+            new GhSuspendedMove($"{m.From.Map}/{m.From.Room}", $"{m.To.Map}/{m.To.Room}",
+                m.ItemName, m.Count, m.IsCarried, m.RequiresSearch)));
 
         if (stillCarried.Count > 0)
         {
@@ -963,8 +975,8 @@ public sealed class GhSweepManager : IDisposable
     // partial-matches onto some other item we really are holding.
     private void RestoreCarriedManifest()
     {
-        if (_carryManifest is null) return;
-        IReadOnlyList<GhCarriedItem> manifest = _carryManifest.Load();
+        if (_suspendedStore is null) return;
+        IReadOnlyList<GhSuspendedMove> manifest = _suspendedStore.LoadCarried();
         if (manifest.Count == 0) return;
 
         if (_inventory is null || !_inventory.IsLoaded)
@@ -977,7 +989,7 @@ public sealed class GhSweepManager : IDisposable
 
         IReadOnlyList<string> carried = _inventory.Snapshot.CarriedItems;
         int adopted = 0, gone = 0;
-        foreach (GhCarriedItem entry in manifest)
+        foreach (GhSuspendedMove entry in manifest)
         {
             if (entry.Item is not { Length: > 0 } name
                 || ParseRoom(entry.From) is not { } from
@@ -1000,6 +1012,41 @@ public sealed class GhSweepManager : IDisposable
         _log?.Info(LogCategory,
             $"resuming {adopted} item(s) still carried from the last sweep"
             + (gone > 0 ? $"; {gone} no longer in the pack and dropped from the manifest" : string.Empty));
+    }
+
+    // Rebuild the suspended queue from the persisted record, for a Resume in a
+    // session that never ran the sweep that made it. Carried entries are NOT
+    // verified here — Resume routes them through the same delivery path as any
+    // other carried move, and a drop for something we no longer hold is caught by
+    // the refusal handling (which re-checks inventory) rather than by trusting the
+    // record. Unparseable rows are skipped rather than failing the whole restore.
+    private List<PendingSortMove>? RehydrateSuspended()
+    {
+        if (_suspendedStore is null) return null;
+        IReadOnlyList<GhSuspendedMove> saved = _suspendedStore.Load();
+        if (saved.Count == 0) return null;
+
+        List<PendingSortMove> restored = new();
+        foreach (GhSuspendedMove entry in saved)
+        {
+            if (entry.Item is not { Length: > 0 } name
+                || ParseRoom(entry.From) is not { } from
+                || ParseRoom(entry.To) is not { } to) continue;
+
+            restored.Add(new PendingSortMove
+            {
+                From = from,
+                To = to,
+                ItemName = name,
+                Count = Math.Max(1, entry.Count),
+                RequiresSearch = entry.Hidden,
+                IsCarried = entry.Carried,
+            });
+        }
+
+        _log?.Info(LogCategory,
+            $"rehydrated {restored.Count} unfinished move(s) from the last session's sweep");
+        return restored.Count > 0 ? restored : null;
     }
 
     private static RoomKey? ParseRoom(string? coordinate)

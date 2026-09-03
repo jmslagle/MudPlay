@@ -175,9 +175,11 @@ public sealed partial class GhManagementSectionViewModel : WorkshopSectionViewMo
     {
         IsRunning = _sweep.Phase != GhSweepManager.SweepPhase.Idle;
         CanResume = _sweep.CanResume;
+        // Always says something: a disabled button with no tooltip reads as broken
+        // rather than as "nothing to resume right now".
         ResumeHint = _sweep.CanResume
-            ? $"{_sweep.ResumableMoveCount} move(s) left from the interrupted sweep — Resume skips the scan."
-            : null;
+            ? $"Carry on from the interrupted sweep — {_sweep.ResumableMoveCount} move(s) left, and the scan is skipped."
+            : "Nothing to resume — this lights up when a sweep stops with work left to do.";
         bool inventoryOnly = _sweep.Mode == GhSweepManager.SweepMode.InventoryOnly;
         PhaseText = _sweep.Phase switch
         {
