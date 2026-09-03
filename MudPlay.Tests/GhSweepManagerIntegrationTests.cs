@@ -537,6 +537,134 @@ public sealed class GhSweepManagerIntegrationTests : IDisposable
         inventory.Dispose();
     }
 
+    [Fact]
+    public void FullDestination_RerootsTheWholeBatchToTheBackupRoom()
+    {
+        // Reproduces the sweep that spent nine minutes re-sending the same refused
+        // drops every lap: the destination was at item capacity, nothing confirmed,
+        // and the queue was requeued into the identical wall forever. One refusal
+        // line now marks the room and moves everything bound for it to the next
+        // room labeled for the same category.
+        Directory.CreateDirectory(Path.Combine(_root, "alpha"));
+        File.WriteAllText(Path.Combine(_root, "alpha", "Rooms.json"), """
+            [
+              { "Map Number": 1, "Room Number": 1, "Name": "A", "Light": 0, "Shop": 0, "Lair": "", "Delay": 0,
+                "N": "1/3", "S": "0", "E": "0", "W": "0", "NE": "0", "NW": "0", "SE": "0", "SW": "0", "U": "0", "D": "0" },
+              { "Map Number": 1, "Room Number": 2, "Name": "B", "Light": 0, "Shop": 0, "Lair": "", "Delay": 0,
+                "N": "0", "S": "1/3", "E": "0", "W": "0", "NE": "0", "NW": "0", "SE": "0", "SW": "0", "U": "0", "D": "0" },
+              { "Map Number": 1, "Room Number": 3, "Name": "C", "Light": 0, "Shop": 0, "Lair": "", "Delay": 0,
+                "N": "1/2", "S": "1/1", "E": "0", "W": "0", "NE": "0", "NW": "0", "SE": "0", "SW": "0", "U": "0", "D": "0" }
+            ]
+            """);
+        File.WriteAllText(Path.Combine(_root, "alpha", "Items.json"), """
+            [
+              { "Number": 1, "Name": "war hammer", "ItemType": 1, "Encum": 10 },
+              { "Number": 3, "Name": "mace", "ItemType": 1, "Encum": 10 }
+            ]
+            """);
+
+        GameDataCache cache = new(_root);
+        cache.SwitchSet("alpha");
+        RoomGraphManager graph = new(cache);
+        graph.OnActiveSetChanged("alpha");
+        ItemNameStore names = new(cache);
+        names.OnActiveSetChanged("alpha");
+
+        ProfileService profile = new();
+        profile.LoadBlank();
+        GhRoomLabelStore labels = new(profile);
+        labels.OnBbsPinApplied(_scratchBbs);
+        // Two rooms labeled for the SAME category: A is the primary (first
+        // labeled), B is its backup purely by also matching. No other config.
+        labels.SetLabel(new RoomKey(1, 1),
+            new[] { GhCategoryRule.ForItemType(1) }, isCatchAll: false);
+        labels.SetLabel(new RoomKey(1, 2),
+            new[] { GhCategoryRule.ForItemType(1) }, isCatchAll: false);
+        labels.SetSearchesPerRoom(1);
+        labels.SetSearchForHidden(false);
+
+        MessageRouter router = new();
+        DefaultPatterns.Seed(router);
+        GroundItemTracker ground = new(router, new CurrencyNaming(),
+            entry => names.FindByName(entry) is not null);
+        InventoryManager inventory = new(itemWeightResolver: names.WeightOf);
+        LineExtractor inventoryLines = new(new TerminalEmulator(80, 24));
+        inventory.AttachLineExtractor(inventoryLines);
+        FeedInventory(inventoryLines, "nothing");
+
+        RoomTracker tracker = new(graph);
+        MovementCoordinator coordinator = new();
+        GhSweepManager? sweep = null;
+        tracker.StateChanged += transition =>
+        {
+            if (transition.NewRoom is null) return;
+            if (transition.PreviousRoom is { } previous
+                && previous.Key.Equals(transition.NewRoom.Key)) return;
+            ground.OnRoomChanged();
+            sweep?.OnRoomChanged(transition);
+        };
+
+        BfsMapper bfs = new(graph);
+        LoopRunner runner = new(tracker, coordinator, graph: graph, bfs: bfs,
+            postToUi: action => action());
+        sweep = new GhSweepManager(labels, runner, tracker, bfs, ground, names,
+            router, coordinator, isOtherEngineBusy: () => false,
+            isParadigm: () => true, inventory: inventory);
+
+        var sent = new List<string>();
+        sweep.SetWireSender(bytes => sent.Add(Encoding.Latin1.GetString(bytes).TrimEnd('\r')));
+        runner.SetWireSender(bytes => sent.Add(Encoding.Latin1.GetString(bytes).TrimEnd('\r')));
+
+        tracker.SetLocated(new RoomKey(1, 1));
+        Assert.True(sweep.Start());
+
+        // Recon the A→C→B→C→A circuit; a war hammer is sitting in transit room C.
+        FeedRouter(router, "You notice a war hammer here.");
+        tracker.NoteRoomObserved(new RoomObservation("C", new HashSet<Direction> { Direction.N, Direction.S }),
+            DateTimeOffset.UtcNow.AddSeconds(1));
+        tracker.NoteRoomObserved(new RoomObservation("B", new HashSet<Direction> { Direction.S }),
+            DateTimeOffset.UtcNow.AddSeconds(2));
+        tracker.NoteRoomObserved(new RoomObservation("C", new HashSet<Direction> { Direction.N, Direction.S }),
+            DateTimeOffset.UtcNow.AddSeconds(3));
+        tracker.NoteRoomObserved(new RoomObservation("A", new HashSet<Direction> { Direction.N }),
+            DateTimeOffset.UtcNow.AddSeconds(4));
+        Assert.Equal(GhSweepManager.SweepPhase.Sorting, sweep.Phase);
+
+        // Collect it at C, then deliver to A — the first room labeled for weapons.
+        tracker.NoteRoomObserved(new RoomObservation("C", new HashSet<Direction> { Direction.N, Direction.S }),
+            DateTimeOffset.UtcNow.AddSeconds(5));
+        Assert.Equal("get war hammer", sent[^1]);
+        FeedRouter(router, "You took war hammer.");
+        tracker.NoteRoomObserved(new RoomObservation("A", new HashSet<Direction> { Direction.N }),
+            DateTimeOffset.UtcNow.AddSeconds(6));
+        Assert.Equal("drop war hammer", sent[^1]);
+
+        // A is full. Before this, that produced no confirmation, a settle timeout,
+        // and the same drop again next lap, forever.
+        FeedRouter(router, "There is no room to drop war hammer here.");
+
+        // Re-targeted onto B and still carried, so the sweep walks north to deliver
+        // rather than retrying A. The item is NOT abandoned.
+        Assert.Equal(1, sweep.CarriedPendingCount);
+        Assert.Equal("n", sent[^1]);
+        Assert.DoesNotContain(GhLeftReason.AllDestinationsFull, sweep.LeftInPlace.Select(l => l.Reason));
+
+        tracker.NoteRoomObserved(new RoomObservation("C", new HashSet<Direction> { Direction.N, Direction.S }),
+            DateTimeOffset.UtcNow.AddSeconds(7));
+        tracker.NoteRoomObserved(new RoomObservation("B", new HashSet<Direction> { Direction.S }),
+            DateTimeOffset.UtcNow.AddSeconds(8));
+        Assert.Equal("drop war hammer", sent[^1]);
+
+        FeedRouter(router, "You dropped war hammer.");
+        Assert.Equal(0, sweep.PendingMoveCount);
+        // Never retried the full room.
+        Assert.Equal(2, sent.Count(c => c == "drop war hammer"));
+
+        sweep.Dispose();
+        ground.Dispose();
+        inventory.Dispose();
+    }
+
     private static void FireSearchSettle(GhSweepManager sweep) =>
         typeof(GhSweepManager).GetMethod("OnReconSearchSettleElapsed",
             BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(sweep, null);

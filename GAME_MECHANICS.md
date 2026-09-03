@@ -816,6 +816,34 @@ thought it fit and it didn't), so re-verify inventory once (`i`) to resync the b
 Do **not** name-match a failure line's word to decide anything — match by "we just sent a `get` and
 got a failure back," since the echo can be truncated or absent.
 
+## Room item capacity — drop refusal *([CONFIRMED] 2026-09-02, user, live capture)*
+
+A room holds a limited number of items. A `drop` into a room already at that limit is refused:
+
+```
+[HP=642/MA=265]:drop pend
+There is no room to drop amethyst pendant here.
+```
+
+Two details that matter:
+
+- **The reply carries the item's FULL canonical name**, not the word typed. The command above
+  abbreviated it to `pend`, and the refusal still named `amethyst pendant`. So unlike the `get`
+  failures above — where the echo can be truncated and name-matching is explicitly unsafe — a drop
+  refusal CAN be correlated to the outstanding drop by name.
+- **It is per-drop, not per-batch.** A batch of N drops into a full room produces N refusals, one
+  per command, and none of them confirm.
+
+The exact capacity is unknown, and the client never needs it: "full" is only ever learned by being
+refused.
+
+**Client implication (Roomba Mode):** a refusal marks that room full for the rest of the sweep. Every
+pending move bound there — carried or not yet collected — is re-resolved onto the next room labeled
+for the same category, then the catch-all; anything with nowhere left is recorded and dropped from
+the queue rather than retried. The same mark also makes the room a *preferred pickup source*, since
+the foreign items sitting in it are the only ones whose removal frees its capacity. The mark is
+per-sweep: a full room is only full until someone loots it.
+
 ## Lair respawn timers & NPC-placed monsters *([CONFIRMED] 2026-08-02, user)*
 
 Two distinct spawn mechanisms, and they respawn on completely different rules. This matters

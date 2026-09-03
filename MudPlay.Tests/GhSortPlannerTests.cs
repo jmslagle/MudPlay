@@ -124,4 +124,58 @@ public sealed class GhSortPlannerTests
         Assert.Empty(GhSortPlanner.SplitIntoTrips(0, 10));
         Assert.Empty(GhSortPlanner.SplitIntoTrips(10, 0));
     }
+
+    [Fact]
+    public void FullRoom_IsDrainedFirst_EvenWhenFarther()
+    {
+        // The foreign items sitting in a full room are the only things whose
+        // removal frees its capacity, so relieving it beats a nearer source that
+        // isn't blocking anything.
+        RoomKey? next = GhSortPlanner.NextTarget(
+            carried: System.Array.Empty<RoomKey>(),
+            pickups: new[] { Pick(2, 10), Pick(7, 10) },
+            headroom: 100,
+            distancesFromHere: Dist((2, 1), (7, 9)),
+            full: new HashSet<RoomKey> { R(7) });
+        Assert.Equal(R(7), next);
+    }
+
+    [Fact]
+    public void FullRoomWithNothingToPullOut_DoesNotDivertTheTrip()
+    {
+        // Full but no pending pickups there — nothing to drain, so the ordinary
+        // nearest-source rule stands.
+        RoomKey? next = GhSortPlanner.NextTarget(
+            carried: System.Array.Empty<RoomKey>(),
+            pickups: new[] { Pick(2, 10) },
+            headroom: 100,
+            distancesFromHere: Dist((2, 4), (7, 1)),
+            full: new HashSet<RoomKey> { R(7) });
+        Assert.Equal(R(2), next);
+    }
+
+    [Fact]
+    public void FullRoomPickupTooHeavy_FallsBackToTheOrdinaryRule()
+    {
+        // Relief only jumps the queue for something that actually fits the pack.
+        RoomKey? next = GhSortPlanner.NextTarget(
+            carried: System.Array.Empty<RoomKey>(),
+            pickups: new[] { Pick(2, 10), Pick(7, 500) },
+            headroom: 100,
+            distancesFromHere: Dist((2, 4), (7, 1)),
+            full: new HashSet<RoomKey> { R(7) });
+        Assert.Equal(R(2), next);
+    }
+
+    [Fact]
+    public void NoFullRoomsSupplied_BehavesExactlyAsBefore()
+    {
+        RoomKey? next = GhSortPlanner.NextTarget(
+            carried: System.Array.Empty<RoomKey>(),
+            pickups: new[] { Pick(2, 10), Pick(3, 10) },
+            headroom: 100,
+            distancesFromHere: Dist((2, 5), (3, 2)),
+            full: null);
+        Assert.Equal(R(3), next);
+    }
 }

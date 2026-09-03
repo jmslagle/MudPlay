@@ -11,4 +11,8 @@ public enum GhLeftReason
     // Too heavy to ever carry within the working encumbrance budget, so no
     // delivery could free enough room to move it.
     TooHeavy,
+    // Every room that could hold it — each labeled match, then the catch-all —
+    // refused the drop as full. Requeueing it would just retry the same wall, so
+    // it waits for the next sweep, by which time the rooms may have space.
+    AllDestinationsFull,
 }

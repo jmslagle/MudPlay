@@ -99,7 +99,11 @@ public sealed class GhSweepManager : IDisposable
     private sealed class PendingSortMove
     {
         public required RoomKey From { get; init; }
-        public required RoomKey To { get; init; }
+        // Settable, unlike From: a destination that refuses the drop as full is
+        // re-targeted onto a backup room mid-sweep. The trip planner reads
+        // destinations straight off this ledger, so rewriting To is all it takes
+        // to route the carried item somewhere else.
+        public required RoomKey To { get; set; }
         public required string ItemName { get; init; }
         public required int Count { get; init; }
         public required bool RequiresSearch { get; init; }
@@ -123,6 +127,7 @@ public sealed class GhSweepManager : IDisposable
     private readonly LogService? _log;
     private readonly IDisposable _getSub;
     private readonly IDisposable _dropSub;
+    private readonly IDisposable _dropRefusedSub;
 
     private readonly DispatcherTimer _reconSearchSettle;
     private readonly DispatcherTimer _dispatchSettle;
@@ -138,6 +143,20 @@ public sealed class GhSweepManager : IDisposable
     // releases the hold while leaving unconfirmed work queued for the next lap.
     private RoomKey? _dispatchRoom;
     private readonly List<PendingSortMove> _outstandingDispatch = new();
+
+    // Rooms the game refused a drop in ("There is no room to drop X here.") this
+    // sweep. Two opposite effects from the one set: excluded as a DESTINATION, so
+    // pending moves re-resolve onto a backup room; and preferred as a SOURCE, so
+    // the foreign items sitting in them — the only things whose removal frees the
+    // capacity — get pulled out first.
+    //
+    // Per-sweep, cleared on start: a full room is only full until someone loots it,
+    // and carrying the mark across sweeps would permanently skip a room that has
+    // since emptied. Deliberately NOT cleared when a get frees a slot mid-sweep —
+    // every pending drop for the room has already been re-targeted by then, so
+    // restoring it as a destination would just churn them back and risk a
+    // mark/clear/refuse loop.
+    private readonly HashSet<RoomKey> _fullRooms = new();
 
     // Full-ledger verification: we trust "You took X" / "You dropped X" as ground
     // truth and track the working carry weight ourselves (each confirmed get adds
@@ -213,6 +232,11 @@ public sealed class GhSweepManager : IDisposable
 
     public IReadOnlyList<GhSweepMove> MovedSoFar => _movedSoFar;
     public IReadOnlyList<GhSweepItemFound> LeftInPlace => _leftInPlace;
+
+    // Rooms that refused a drop as full this sweep. Surfaced for the bug report:
+    // "Roomba kept carrying everything" reads identically to a routing bug unless
+    // you can see the destinations were simply out of space.
+    public IReadOnlyCollection<RoomKey> FullRooms => _fullRooms;
     public IReadOnlyList<GhSweepStranded> Stranded => _stranded;
     public int CircuitRoomCount => _sweepRooms.Count;
     public int PendingMoveCount => _pending.Count(p => !p.Delivered);
@@ -302,6 +326,7 @@ public sealed class GhSweepManager : IDisposable
 
         _getSub = _router.Subscribe(KnownPatterns.PlayerGets, OnGetLine);
         _dropSub = _router.Subscribe(KnownPatterns.PlayerDrops, OnDropLine);
+        _dropRefusedSub = _router.Subscribe(KnownPatterns.RoomDropRefused, OnDropRefusedLine);
         // Raw-line hook for the get-FAILURE shapes (no KnownPattern for them);
         // gated hard on an outstanding get so a manual `get` failure isn't ours.
         _router.LineDispatched += OnLineForGetFailure;
@@ -374,6 +399,7 @@ public sealed class GhSweepManager : IDisposable
         _movedSoFar.Clear();
         _leftInPlace.Clear();
         _stranded.Clear();
+        _fullRooms.Clear();
         CompletedReconLaps = 0;
         _sortLapCount = 0;
         _progressSnapshotMoved = 0;
@@ -569,6 +595,16 @@ public sealed class GhSweepManager : IDisposable
             _log?.Warn(LogCategory,
                 $"sweep ending with {stillCarried.Count} item(s) still carried, undelivered: "
                 + string.Join("; ", stillCarried.Select(m => $"{m.ItemName} (from {m.From}) -> {m.To}")));
+        }
+
+        // Name the rooms that hit capacity — otherwise a sweep that quietly
+        // rerouted half its load reads the same as one that had nowhere to go.
+        if (_fullRooms.Count > 0)
+        {
+            _log?.Warn(LogCategory,
+                $"{_fullRooms.Count} room(s) were full this sweep: "
+                + string.Join(", ", _fullRooms.OrderBy(r => r.Map).ThenBy(r => r.Room))
+                + ". Label another room for the same category to give them a backup.");
         }
 
         return new GhSweepReport(_movedSoFar.ToList(), _leftInPlace.ToList(), _stranded.ToList());
@@ -1061,6 +1097,74 @@ public sealed class GhSweepManager : IDisposable
         ResolveConfirm(m.Groups[1], isDrop: false);
     }
 
+    // The room is at item capacity ("There is no room to drop X here."). One line
+    // reroutes the whole batch: a full room refuses every drop we just sent, so
+    // the first refusal marks the room and re-targets everything bound for it, and
+    // the remaining refusal lines then match nothing and fall through harmlessly.
+    private void OnDropRefusedLine(MatchResult m)
+    {
+        if (Phase != SweepPhase.Sorting) return;
+        if (m.Groups.Count < 1) return;
+        if (_tracker.State.CurrentRoom is not { } current) return;
+        if (_dispatchRoom is not { } dispatchRoom || !dispatchRoom.Equals(current.Key)) return;
+
+        (_, string name) = CountedCommand.SplitLeadingCount(m.Groups[0]);
+        PendingSortMove? refused = _outstandingDispatch.FirstOrDefault(
+            p => !p.Delivered && p.IsCarried && SameItem(p.ItemName, name));
+        if (refused is null) return;   // a manual drop, or already handled
+
+        if (_fullRooms.Add(dispatchRoom))
+            _log?.Warn(LogCategory,
+                $"{dispatchRoom} is full (refused {name}) — re-targeting everything bound for it "
+                + "and prioritising it as a pickup source to free space");
+
+        // Every outstanding drop here will be refused too; stop waiting on them.
+        foreach (PendingSortMove queued in _outstandingDispatch
+                     .Where(p => !p.Delivered && p.IsCarried && p.To.Equals(dispatchRoom)).ToList())
+            _outstandingDispatch.Remove(queued);
+
+        RetargetAwayFromFullRooms();
+
+        PhaseChanged?.Invoke();
+        if (_outstandingDispatch.Count == 0)
+        {
+            _dispatchSettle.Stop();
+            _dispatchRoom = null;
+            ContinueAfterTransaction("destination full");
+        }
+    }
+
+    // Re-resolve every pending move whose destination has gone full — carried and
+    // not-yet-collected alike — onto the next room that admits it (another labeled
+    // room for the same category, then the catch-all). Anything with nowhere left
+    // is recorded and dropped from the queue rather than retried into the same
+    // wall every lap, which is exactly what used to run forever.
+    private void RetargetAwayFromFullRooms()
+    {
+        foreach (PendingSortMove move in _pending
+                     .Where(p => !p.Delivered && _fullRooms.Contains(p.To)).ToList())
+        {
+            GhItemClass? cls = GhItemClassifier.Classify(_itemNames, move.ItemName);
+            RoomKey? dest = cls is { } c
+                ? GhDestinationResolver.Resolve(c, _labels.Labels, _fullRooms)
+                : null;
+
+            if (dest is not { } target)
+            {
+                _log?.Warn(LogCategory,
+                    $"nowhere left for {move.ItemName}: every matching room and the catch-all are full "
+                    + $"— leaving it{(move.IsCarried ? " carried" : $" at {move.From}")}");
+                _leftInPlace.Add(new GhSweepItemFound(move.From, move.ItemName, GhLeftReason.AllDestinationsFull));
+                _pending.Remove(move);
+                continue;
+            }
+
+            _log?.Info(LogCategory,
+                $"re-targeting {move.Count}x {move.ItemName}: {move.To} (full) -> {target}");
+            move.To = target;
+        }
+    }
+
     private void ResolveConfirm(string token, bool isDrop)
     {
         (_, string name) = CountedCommand.SplitLeadingCount(token);
@@ -1322,7 +1426,7 @@ public sealed class GhSweepManager : IDisposable
             .ToList();
 
         RoomKey? target = GhSortPlanner.NextTarget(
-            carried, pickups, CurrentHeadroom(), _bfs.ComputeDistancesFrom(here));
+            carried, pickups, CurrentHeadroom(), _bfs.ComputeDistancesFrom(here), _fullRooms);
         if (target is not { } destination) return false;
 
         var shuttle = new Loop(SweepLoopName, new[] { here, destination });
@@ -1463,6 +1567,7 @@ public sealed class GhSweepManager : IDisposable
         _inventorySettle.Stop();
         _getSub.Dispose();
         _dropSub.Dispose();
+        _dropRefusedSub.Dispose();
         _router.LineDispatched -= OnLineForGetFailure;
         _loopRunner.Event -= OnLoopEvent;
         _groundItems.SurveyUpdated -= OnSurveyUpdated;

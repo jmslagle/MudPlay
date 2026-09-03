@@ -1,9 +1,11 @@
 # MudPlay
 
 <!-- current-version:start -->
-> **Version 3.46.4**
-> - Position recovery now asks the game where you are straight away when a move has stalled, instead of waiting for that move to settle first or being rate-limited out — both guards fired exactly when the answer was needed, and the fallback can't work in a house full of identically-named rooms
-> - Fixed a loop sitting idle after position recovery succeeded — if the movement coordinator resumed the loop while recovery was still waiting for an answer, the step was held and the eventual "recovered" signal was dropped instead of restarting it
+> **Version 3.46.5**
+> - Roomba handles a destination room being full: it reroutes everything bound there to the next room labelled for the same category, then the catch-all, instead of re-sending refused drops on every lap forever
+> - A backup room is just a second room labelled for the same category — no new setting
+> - Items with nowhere left to go are recorded with the reason rather than retried, and the sweep summary names the rooms that filled up
+> - Full rooms are now prioritised as places to collect from, since clearing the out-of-place items in them is what frees the space
 >
 > See the [version history](CHANGELOG.md) for the full changelog.
 <!-- current-version:end -->

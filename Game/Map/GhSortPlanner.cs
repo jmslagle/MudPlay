@@ -37,17 +37,29 @@ public static class GhSortPlanner
     //   carried  = distinct destination rooms of items already in the pack.
     //   pickups  = rooms with pending pickups + each room's LIGHTEST pickup weight.
     //   headroom = working budget minus what's already carried (from the ledger).
+    //   full     = rooms the game has refused a drop in this sweep.
     public static RoomKey? NextTarget(
         IReadOnlyCollection<RoomKey> carried,
         IReadOnlyCollection<PickupRoom> pickups,
         int headroom,
-        IReadOnlyDictionary<RoomKey, int> distancesFromHere)
+        IReadOnlyDictionary<RoomKey, int> distancesFromHere,
+        IReadOnlySet<RoomKey>? full = null)
     {
+        List<RoomKey> fitting = pickups.Where(p => p.Weight <= headroom).Select(p => p.Room).ToList();
+
+        // Relieve the full rooms first, even when they're farther off. What's
+        // pending in a full room is by definition foreign to it — the items whose
+        // removal is the only thing that frees the capacity everything else is
+        // queueing behind. Draining a nearer room that isn't under pressure
+        // doesn't help anything move.
+        if (full is { Count: > 0 }
+            && Nearest(fitting.Where(full.Contains), distancesFromHere) is { } relief)
+            return relief;
+
         // Keep filling the pack: the nearest source room that still has something
         // fitting. Batching pickups this way is what removes the extra delivery trips
         // the old "deliver the instant anything is carried" router made.
-        if (Nearest(pickups.Where(p => p.Weight <= headroom).Select(p => p.Room),
-                    distancesFromHere) is { } source)
+        if (Nearest(fitting, distancesFromHere) is { } source)
             return source;
 
         // No source fits (pack full, or headroom too small) — deliver to the
