@@ -433,7 +433,7 @@ public sealed class GhSweepManagerIntegrationTests : IDisposable
     // the fresh dump shows the working budget is now smaller than the item's weight,
     // the item is stranded (too heavy) instead of being retried forever.
     [Fact]
-    public void CapacityRefusal_ResyncsFromInventory_StrandsWhatNoLongerFits()
+    public void CapacityRefusal_ResyncsFromInventory_WithoutWritingOffWhatStillFitsWhenEmpty()
     {
         Directory.CreateDirectory(Path.Combine(_root, "alpha"));
         File.WriteAllText(Path.Combine(_root, "alpha", "Rooms.json"), """
@@ -527,14 +527,24 @@ public sealed class GhSweepManagerIntegrationTests : IDisposable
         FeedRouter(router, "You cannot carry that much!");
         Assert.Equal("i", sent[^1]);
 
-        // The fresh dump shows only 40 of 100 free (base weight is really 60), which
-        // is less than the 60-weight hammer, so it can never be carried → stranded.
+        // The fresh dump shows only 40 of 100 free — the pack is holding 59 more
+        // than when sorting opened. The hammer doesn't fit RIGHT NOW, and the
+        // refusal correctly stops us re-sending the get into a full pack.
         FeedInventory(inventoryLines, "nothing", currentWeight: 60);
 
-        Assert.Contains(sweep.LeftInPlace,
-            f => f.ItemName == "war hammer" && f.Reason == GhLeftReason.TooHeavy);
-        Assert.Equal(0, sweep.PendingMoveCount);
+        Assert.Equal(40, sweep.WorkingWeightBudget);
         Assert.Equal(getsSent, sent.Count(c => c == "get war hammer")); // never re-sent
+
+        // But it is NOT written off. Base is everything in the pack the ledger
+        // doesn't own, so it rises whenever the player picks something up
+        // themselves — and "too heavy to EVER carry" measured against that dip
+        // permanently discards items that fit fine once the pack clears. Judged at
+        // our emptiest (99 free) the hammer is perfectly carriable, so it stays
+        // queued for a later pass.
+        Assert.Equal(99, sweep.BestCaseBudgetForTests);
+        Assert.DoesNotContain(sweep.LeftInPlace,
+            f => f.ItemName == "war hammer" && f.Reason == GhLeftReason.TooHeavy);
+        Assert.Equal(1, sweep.PendingMoveCount);
 
         sweep.Dispose();
         ground.Dispose();
@@ -1079,6 +1089,69 @@ public sealed class GhSweepManagerIntegrationTests : IDisposable
     }
 
     [Fact]
+    public void LootPickedUpMidSweep_NarrowsHeadroomButStrandsNothing()
+    {
+        // Live numbers from a real sweep. Base is everything in the pack the sort
+        // ledger doesn't own, so auto-get loot inflates it — 3513 climbing to 4508
+        // over four resyncs, collapsing the budget 1767 -> 772. Judged against
+        // that dip, 800-weight hauberks were permanently written off as "too heavy
+        // to ever carry" despite fitting comfortably at the sweep's own opening
+        // budget. 56 items went that way in one run.
+        SweepHarness h = NewSweepHarness(_root, _scratchBbs, currentWeight: 3513, maxWeight: 5280);
+
+        h.Tracker.SetLocated(new RoomKey(1, 1));
+        Assert.True(h.Sweep.Start());
+
+        h.Feed("You notice an adamantite hauberk here.");
+        h.Observe("C", Direction.N, Direction.S);
+        h.Observe("B", Direction.S);
+        h.Observe("C", Direction.N, Direction.S);
+        h.Observe("A", Direction.N);
+        Assert.Equal(GhSweepManager.SweepPhase.Sorting, h.Sweep.Phase);
+
+        // Fits the opening budget (5280 - 3513 = 1767) and is queued.
+        Assert.Equal(1767, h.Sweep.WorkingWeightBudget);
+        Assert.Equal(1, h.Sweep.PendingMoveCount);
+
+        // Now the player loots ~1000 of weight Roomba never collected.
+        h.Sweep.SetCarryWeightsForTests(max: 5280, baseWeight: 4508);
+        h.Sweep.StrandUnmovableForTests();
+
+        // Headroom really has narrowed — that part must stay honest, or we
+        // over-fill and earn a capacity refusal.
+        Assert.Equal(772, h.Sweep.WorkingWeightBudget);
+        // But nothing is written off: "ever" is judged at our emptiest.
+        Assert.Equal(1767, h.Sweep.BestCaseBudgetForTests);
+        Assert.Equal(1, h.Sweep.PendingMoveCount);
+
+        h.Dispose();
+    }
+
+    [Fact]
+    public void GenuinelyUnmovableItemIsStillStranded()
+    {
+        // The guard must not become a rubber stamp: something heavier than the
+        // pack could ever hold is still dropped, or the sweep retries it forever.
+        SweepHarness h = NewSweepHarness(_root, _scratchBbs, currentWeight: 4900, maxWeight: 5280);
+
+        h.Tracker.SetLocated(new RoomKey(1, 1));
+        Assert.True(h.Sweep.Start());
+
+        h.Feed("You notice an adamantite hauberk here.");
+        h.Observe("C", Direction.N, Direction.S);
+        h.Observe("B", Direction.S);
+        h.Observe("C", Direction.N, Direction.S);
+        h.Observe("A", Direction.N);
+
+        // Best case is 380, the hauberk is 800 — unmovable however empty we get.
+        Assert.Equal(380, h.Sweep.BestCaseBudgetForTests);
+        Assert.Equal(0, h.Sweep.PendingMoveCount);
+        Assert.Contains(h.Sweep.LeftInPlace, l => l.Reason == GhLeftReason.TooHeavy);
+
+        h.Dispose();
+    }
+
+    [Fact]
     public void CleanlyFinishedSweep_HasNothingToResume()
     {
         SweepHarness h = NewSweepHarness(_root, _scratchBbs);
@@ -1253,7 +1326,7 @@ public sealed class GhSweepManagerIntegrationTests : IDisposable
     }
 
     private static SweepHarness NewSweepHarness(string root, string scratchBbs,
-        GhSuspendedSweepStore? suspended = null)
+        GhSuspendedSweepStore? suspended = null, int currentWeight = 1, int maxWeight = 100)
     {
         Directory.CreateDirectory(Path.Combine(root, "alpha"));
         File.WriteAllText(Path.Combine(root, "alpha", "Rooms.json"), """
@@ -1267,7 +1340,10 @@ public sealed class GhSweepManagerIntegrationTests : IDisposable
             ]
             """);
         File.WriteAllText(Path.Combine(root, "alpha", "Items.json"), """
-            [ { "Number": 1, "Name": "war hammer", "ItemType": 1, "Encum": 1 } ]
+            [
+              { "Number": 1, "Name": "war hammer", "ItemType": 1, "Encum": 1 },
+              { "Number": 2, "Name": "adamantite hauberk", "ItemType": 1, "Encum": 800 }
+            ]
             """);
 
         GameDataCache cache = new(root);
@@ -1293,7 +1369,7 @@ public sealed class GhSweepManagerIntegrationTests : IDisposable
         InventoryManager inventory = new(itemWeightResolver: names.WeightOf);
         LineExtractor inventoryLines = new(new TerminalEmulator(80, 24));
         inventory.AttachLineExtractor(inventoryLines);
-        FeedInventory(inventoryLines, "nothing");
+        FeedInventory(inventoryLines, "nothing", currentWeight, maxWeight);
 
         RoomTracker tracker = new(graph);
         MovementCoordinator coordinator = new();
@@ -1337,12 +1413,14 @@ public sealed class GhSweepManagerIntegrationTests : IDisposable
         router.Dispatch(new LineExtractor.EmittedLine(text, Array.Empty<CellAttributes>(),
             DateTimeOffset.UtcNow, IsPromptLine: false));
 
-    private static void FeedInventory(LineExtractor lines, string carried, int currentWeight = 1)
+    private static void FeedInventory(LineExtractor lines, string carried, int currentWeight = 1,
+                                      int maxWeight = 100)
     {
         FeedLine(lines, $"You are carrying {carried}.");
         FeedLine(lines, "You have no keys.");
         FeedLine(lines, "Wealth:    0 copper farthings");
-        FeedLine(lines, $"Encumbrance:    {currentWeight}/100  -  None  [{currentWeight}%]");
+        FeedLine(lines, $"Encumbrance:    {currentWeight}/{maxWeight}  -  None  "
+                        + $"[{currentWeight * 100 / maxWeight}%]");
     }
 
     private static void FeedLine(LineExtractor lines, string text)

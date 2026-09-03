@@ -1,5 +1,10 @@
 # Version history
 
+## 3.47.2
+
+- Roomba no longer writes off heavy items as "too heavy to carry" because your pack happened to be full of loot at the time — that call is now judged against the pack at its emptiest, while live headroom still tracks reality. One run discarded 56 items this way, including armour that fit fine at the sweep's own opening budget
+- When your pack is so full of things Roomba didn't collect that it has room for barely one item, it now delivers what it's holding and stops with the reason, instead of shuttling a single item per round trip forever. The queue is kept, so free some space and hit Resume
+
 ## 3.47.1
 
 - Roomba's command pacing no longer speeds up when the game tells it to slow down: a prompt can gate a send but can't release one early, since every rate-limit line the game emits carries a prompt of its own

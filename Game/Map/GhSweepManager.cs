@@ -242,11 +242,20 @@ public sealed class GhSweepManager : IDisposable
     // persists between decisions — that's what makes it a run instead of a flap.
     private bool _unloading;
 
+    // Latches the "pack too full to sort" warning so a tight pack reports once
+    // rather than on every reroute.
+    private bool _reportedTightPack;
+
     // Baseline captured at sort start (and corrected on a resync): base = the
     // player's gear+pack weight carrying zero Roomba pickups; max = MaxWeight.
     // int.MaxValue max means "no weight data" → fill everything, strand nothing.
     private int _baseCarryWeight;
     private int _maxCarryWeight = int.MaxValue;
+
+    // Lowest base seen this sweep — the pack at its emptiest, which is the only
+    // honest yardstick for a permanent "can this ever be carried" call. Tracked
+    // separately from _baseCarryWeight, which moves with the live pack.
+    private int _minBaseCarryWeight = int.MaxValue;
 
     // Recon's own direct-search dispatch (mirrors _outstandingDispatch's role
     // for Sorting's get/drop dispatch): which circuit room we're currently
@@ -518,8 +527,10 @@ public sealed class GhSweepManager : IDisposable
         _resyncPending = false;
         _verifyCarriedAfterResync = false;
         _unloading = false;
+        _reportedTightPack = false;
         _baseCarryWeight = 0;
         _maxCarryWeight = int.MaxValue;
+        _minBaseCarryWeight = int.MaxValue;
 
     }
 
@@ -843,6 +854,10 @@ public sealed class GhSweepManager : IDisposable
             _maxCarryWeight = int.MaxValue;
             _baseCarryWeight = 0;
         }
+        // Sorting opens with an empty sort-load, so this reading is the cleanest
+        // base we'll get — but a later resync can still beat it if the player
+        // sheds gear, so track the minimum rather than pinning this one.
+        _minBaseCarryWeight = _baseCarryWeight;
     }
 
     // Correct the baseline from a fresh `i` after a capacity refusal proved the
@@ -853,9 +868,14 @@ public sealed class GhSweepManager : IDisposable
         if (_inventory?.Snapshot.Encumbrance is not { MaxWeight: > 0 } enc) return;
         _maxCarryWeight = enc.MaxWeight;
         _baseCarryWeight = Math.Max(0, enc.CurrentWeight - LedgerCarriedWeight());
+        _minBaseCarryWeight = Math.Min(_minBaseCarryWeight, _baseCarryWeight);
         _log?.Info(LogCategory,
             $"resynced carry weight: max={_maxCarryWeight} current={enc.CurrentWeight} "
-            + $"base={_baseCarryWeight} ledgerCarried={LedgerCarriedWeight()}");
+            + $"base={_baseCarryWeight} (lowest {_minBaseCarryWeight}) ledgerCarried={LedgerCarriedWeight()}"
+            + (_baseCarryWeight > _minBaseCarryWeight
+                ? $"; pack holds {_baseCarryWeight - _minBaseCarryWeight} of weight Roomba didn't collect, "
+                  + "so live headroom is down but nothing is written off for it"
+                : string.Empty));
     }
 
     // Total weight of everything Roomba is currently carrying (picked up, not yet
@@ -863,12 +883,26 @@ public sealed class GhSweepManager : IDisposable
     private int LedgerCarriedWeight()
         => _pending.Where(m => m.IsCarried && !m.Delivered).Sum(MoveWeight);
 
-    // The most sort-item weight we could ever hold at once: MaxWeight minus the
-    // base gear/pack weight. int.MaxValue when there's no weight data to judge by.
+    // The most sort-item weight we could hold at once RIGHT NOW: MaxWeight minus
+    // whatever the pack is currently carrying that isn't ours. Live on purpose —
+    // headroom has to track reality or we over-fill and earn a capacity refusal.
+    // int.MaxValue when there's no weight data to judge by.
     private int WorkingBudget()
         => _maxCarryWeight == int.MaxValue
             ? int.MaxValue
             : Math.Max(0, _maxCarryWeight - _baseCarryWeight);
+
+    // The budget at our emptiest this sweep. "Base" is everything in the pack the
+    // sort ledger doesn't own, and it is NOT stable: auto-get loot, a quest item,
+    // anything picked up mid-sweep inflates it, and it only falls again once that
+    // weight leaves. So the live budget is the wrong yardstick for any permanent
+    // decision — measured against a dip, an item looks unmovable when it would fit
+    // fine minutes later. Use this for "could we EVER carry this", and the live
+    // budget for "does it fit at this moment".
+    private int BestCaseBudget()
+        => _maxCarryWeight == int.MaxValue
+            ? int.MaxValue
+            : Math.Max(0, _maxCarryWeight - _minBaseCarryWeight);
 
     // How much more can be carried right now, from the tracked ledger (no `i`):
     // working budget minus what's already in the pack. No cap without weight data.
@@ -924,17 +958,24 @@ public sealed class GhSweepManager : IDisposable
     // LeftInPlace so the user sees what was skipped. No-op without weight data.
     private void StrandUnmovableItems()
     {
-        int workingBudget = WorkingBudget();
-        if (workingBudget == int.MaxValue) return;
+        // Judged against the BEST budget we've seen this sweep, not the current
+        // one. This decision is permanent — the move is removed and recorded — so
+        // "too heavy" has to mean "too heavy at our emptiest", not "too heavy
+        // right now". The live budget dips whenever the pack holds anything Roomba
+        // didn't put there (auto-get loot, a quest item), and writing items off
+        // against a dip permanently discards armour that fits perfectly well once
+        // the pack clears.
+        int bestBudget = BestCaseBudget();
+        if (bestBudget == int.MaxValue) return;
         foreach (PendingSortMove move in _pending
             .Where(m => !m.Delivered && !m.IsCarried
-                        && (_itemNames.WeightOf(m.ItemName) ?? 0) > workingBudget).ToList())
+                        && (_itemNames.WeightOf(m.ItemName) ?? 0) > bestBudget).ToList())
         {
             _pending.Remove(move);
             _leftInPlace.Add(new GhSweepItemFound(move.From, move.ItemName, GhLeftReason.TooHeavy));
             _log?.Info(LogCategory,
-                $"too heavy to carry (unit weight {_itemNames.WeightOf(move.ItemName)} > working budget "
-                + $"{workingBudget}): leaving {move.Count}x {move.ItemName} at {move.From}");
+                $"too heavy to carry (unit weight {_itemNames.WeightOf(move.ItemName)} > best-case budget "
+                + $"{bestBudget}): leaving {move.Count}x {move.ItemName} at {move.From}");
         }
     }
 
@@ -1434,6 +1475,17 @@ public sealed class GhSweepManager : IDisposable
         SendNextQueuedCommand();
     }
     internal int QueuedCommandCountForTests => _commandQueue.Count;
+
+    // Weight model, for asserting that a pack temporarily loaded with things
+    // Roomba didn't collect narrows headroom without writing anything off.
+    internal int BestCaseBudgetForTests => BestCaseBudget();
+    internal void SetCarryWeightsForTests(int max, int baseWeight)
+    {
+        _maxCarryWeight = max;
+        _baseCarryWeight = baseWeight;
+        _minBaseCarryWeight = Math.Min(_minBaseCarryWeight, baseWeight);
+    }
+    internal void StrandUnmovableForTests() => StrandUnmovableItems();
 
     // The game reported a rate-limit clobber. On the hard form the last command
     // was DROPPED, so re-queue it at the front; on the soft nudge it probably
@@ -1958,6 +2010,32 @@ public sealed class GhSweepManager : IDisposable
                 ? $"pack at {LedgerCarriedWeight()}/{WorkingBudget()} — delivering until it's back under "
                   + $"{GhSortPlanner.UnloadExitLoad:P0} before collecting again"
                 : $"pack down to {LedgerCarriedWeight()}/{WorkingBudget()} — collecting again");
+
+        // A pack with room for barely one item can't sort — it collects one thing,
+        // immediately crosses the unload threshold, walks the whole way to deliver
+        // it, and walks back for the next. Every item costs a full round trip and
+        // the sweep looks hung. That happens when the pack is mostly full of
+        // weight Roomba didn't collect (auto-get loot), which no amount of
+        // delivering on our side will free. Stop collecting, deliver what we're
+        // holding, and end with the reason — the queue is kept, so Resume carries
+        // on once there's room.
+        int lightestPickup = pickups.Count == 0 ? 0 : pickups.Min(p => p.Weight);
+        bool tooTightToCollect = pickups.Count > 0
+            && WorkingBudget() != int.MaxValue
+            && WorkingBudget() < Math.Max(1, lightestPickup) * 2;
+        if (tooTightToCollect)
+        {
+            if (!_reportedTightPack)
+            {
+                _reportedTightPack = true;
+                _log?.Warn(LogCategory,
+                    $"pack has only {WorkingBudget()} of {_maxCarryWeight} usable — the rest is weight Roomba "
+                    + $"didn't collect. The lightest thing left to move is {lightestPickup}, so every item would "
+                    + "cost its own delivery trip. Delivering what's carried, then stopping; free some space and "
+                    + "Resume.");
+            }
+            pickups = new List<GhSortPlanner.PickupRoom>();
+        }
 
         RoomKey? target = GhSortPlanner.NextTarget(
             carried, pickups, CurrentHeadroom(), _bfs.ComputeDistancesFrom(here), _fullRooms, _unloading);
