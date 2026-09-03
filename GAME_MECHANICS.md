@@ -2404,7 +2404,12 @@ the movement command that followed it, which left the tracker Pending on a move 
 never processed and took the sweep down with it. The collateral damage to the *next* command
 is the part worth remembering: a flood doesn't just cost you the flooded batch. Roomba now
 releases get/drop one command per wire prompt, which needs no guess at the rate because the
-game's own prompt is the meter. This is distinct from the outbound-write **interleaving** bug
+game's own prompt is the meter — but the prompt alone is NOT sufficient as a rate signal.
+**Every rate-limit line the game emits carries its own prompt** *(2026-09-03, observed)*, so gating
+purely on prompts accelerates under exactly the condition that should slow a client down: the nudge
+arrives with a prompt, the prompt releases another command, which earns another nudge. Observed as
+bursts of five nudges inside 200ms, repeating every back-off. Pace on a time floor with the prompt as
+a gate on top of it, never as the sole trigger. This is distinct from the outbound-write **interleaving** bug
 (that was a client-side concurrency defect in `TelnetClient`, not a game rate limit).
 
 ## Spell targeting: monster type tags

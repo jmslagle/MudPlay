@@ -189,7 +189,7 @@ public sealed class GhSweepManagerIntegrationTests : IDisposable
         Assert.Equal("drop war hammer", sent[^1]);
         FeedRouter(router, "You dropped war hammer.");
 
-        sweep.FirePromptForTests();
+        sweep.FirePromptWaitTimeoutForTests();
         Assert.Equal("drop mace", sent[^1]);
         FeedRouter(router, "You dropped mace.");
         // Everything is delivered — sorting is done and a final recon pass begins to
@@ -655,12 +655,20 @@ public sealed class GhSweepManagerIntegrationTests : IDisposable
         Assert.Equal(clobbered, sent[^1]);
         FeedRouter(router, $"You took {clobbered["get ".Length..]}.");
 
-        // Each remaining command waits for its own prompt.
+        // A prompt arriving inside the minimum interval must NOT release the next
+        // command. Every rate-limit line the game sends carries a prompt, so
+        // releasing on prompt alone speeds up under exactly the condition that
+        // should slow us down — observed live as bursts of five nudges in 200ms.
+        int sentBeforeEarlyPrompt = sent.Count;
         sweep.FirePromptForTests();
+        Assert.Equal(sentBeforeEarlyPrompt, sent.Count);
+
+        // Each remaining command waits for its own prompt.
+        sweep.FirePromptWaitTimeoutForTests();
         Assert.Equal(3, sent.Count(c => c.StartsWith("get ", StringComparison.Ordinal)));
         Assert.Equal(1, sweep.QueuedCommandCountForTests);
 
-        sweep.FirePromptForTests();
+        sweep.FirePromptWaitTimeoutForTests();
         Assert.Equal(4, sent.Count(c => c.StartsWith("get ", StringComparison.Ordinal)));
         Assert.Equal(0, sweep.QueuedCommandCountForTests);
 

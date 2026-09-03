@@ -1,5 +1,10 @@
 # Version history
 
+## 3.47.1
+
+- Roomba's command pacing no longer speeds up when the game tells it to slow down: a prompt can gate a send but can't release one early, since every rate-limit line the game emits carries a prompt of its own
+- A run of rate-limit complaints is treated as one incident rather than restarting the back-off (and filling the log) once per line
+
 ## 3.47.0
 
 - An interrupted sweep no longer dumps its load on you: whatever Roomba was still carrying is remembered per character and delivered by the next sweep, verified against a real inventory read first so anything you dealt with by hand is dropped from the list

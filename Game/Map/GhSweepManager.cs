@@ -68,6 +68,18 @@ public sealed class GhSweepManager : IDisposable
     // its prompts still drains — just at the safe rate instead of the live one.
     private static readonly TimeSpan PromptWaitTimeout = TimeSpan.FromMilliseconds(800);
 
+    // Hard floor between sends, prompt or no prompt. A prompt alone is NOT a safe
+    // release token: every rate-limit line the game emits carries one, so
+    // prompt-gating on its own speeds up under exactly the condition it should be
+    // slowing down for — nudge arrives with a prompt, prompt releases another
+    // command, which earns another nudge. Observed live as bursts of five nudges
+    // inside 200ms, repeating every backoff.
+    //
+    // 800ms is the one interval known to be safe on this realm (GAME_MECHANICS:
+    // the paced @roomba sync uses it), so it's the floor rather than a guess. The
+    // prompt still gates — it just can't release EARLY.
+    private static readonly TimeSpan MinCommandInterval = TimeSpan.FromMilliseconds(800);
+
     // Pause after the game complains about our command rate before resuming the
     // queue. Matches RoombaSyncSender's clobber backoff, for the same reason:
     // give the limiter time to forgive before pushing again.
@@ -195,6 +207,7 @@ public sealed class GhSweepManager : IDisposable
     // burst. See DispatchAtRoomAfterSearch for why the burst was fatal.
     private readonly Queue<(string Verb, PendingSortMove Move)> _commandQueue = new();
     private (string Verb, PendingSortMove Move)? _lastQueuedCommand;
+    private DateTimeOffset _lastCommandSentAt = DateTimeOffset.MinValue;
 
     // Rooms the game refused a drop in ("There is no room to drop X here.") this
     // sweep. Two opposite effects from the one set: excluded as a DESTINATION, so
@@ -1335,6 +1348,10 @@ public sealed class GhSweepManager : IDisposable
         _commandQueue.Clear();
         foreach (PendingSortMove move in drops) _commandQueue.Enqueue(("drop", move));
         foreach (PendingSortMove move in gets) _commandQueue.Enqueue(("get", move));
+        // The floor paces commands WITHIN a batch. Reaching a new room means we
+        // just walked here, which is seconds of wall clock on its own, so the
+        // first command of a batch shouldn't wait on the previous room's last one.
+        _lastCommandSentAt = DateTimeOffset.MinValue;
         SendNextQueuedCommand();
     }
 
@@ -1346,7 +1363,21 @@ public sealed class GhSweepManager : IDisposable
         _promptWait.Stop();
         if (_commandQueue.Count == 0) return;
 
+        // Never send early, whatever woke us. A prompt arriving sooner than the
+        // floor means the game is talking to us for some other reason — very often
+        // a rate-limit line, whose prompt would otherwise release the next command
+        // and earn another one. Re-arm and wait out the remainder instead.
+        TimeSpan since = DateTimeOffset.UtcNow - _lastCommandSentAt;
+        if (since < MinCommandInterval)
+        {
+            _promptWait.Interval = MinCommandInterval - since;
+            _promptWait.Start();
+            return;
+        }
+        _promptWait.Interval = PromptWaitTimeout;
+
         (string verb, PendingSortMove move) = _commandQueue.Dequeue();
+        _lastCommandSentAt = DateTimeOffset.UtcNow;
         _lastQueuedCommand = (verb, move);
         _dispatchSettle.Stop();
         _dispatchSettle.Start();
@@ -1381,11 +1412,25 @@ public sealed class GhSweepManager : IDisposable
     }
 
     // Test seams — drive the paced dispatch headless, without a wire or timers.
+    // A prompt arriving right now. Deliberately does NOT fast-forward the pace
+    // clock — a test asserting that an early prompt is ignored depends on that.
     internal void FirePromptForTests() => OnPromptObserved();
-    internal void FirePromptWaitTimeoutForTests() => SendNextQueuedCommand();
+
+    // The pacing timer elapsing, which in production means the minimum interval
+    // has genuinely passed. Tests have no wall clock to wait on, so age the last
+    // send to match rather than sleeping.
+    internal void FirePromptWaitTimeoutForTests()
+    {
+        _lastCommandSentAt = DateTimeOffset.MinValue;
+        SendNextQueuedCommand();
+    }
+    // The rate-limit backoff elapsing. Like the pace timer, real time has passed
+    // by the time this fires in production (the backoff is several times the
+    // minimum interval), so age the clock to match.
     internal void FireRateLimitBackoffForTests()
     {
         _rateLimitBackoff.Stop();
+        _lastCommandSentAt = DateTimeOffset.MinValue;
         SendNextQueuedCommand();
     }
     internal int QueuedCommandCountForTests => _commandQueue.Count;
@@ -1397,6 +1442,12 @@ public sealed class GhSweepManager : IDisposable
     {
         if (Phase != SweepPhase.Sorting) return;
         if (_commandQueue.Count == 0 && _lastQueuedCommand is null) return;
+
+        // The game answers one over-fast batch with a run of these lines, and
+        // they arrive together. Treat the run as one event: already backing off
+        // and not told a command was lost means there's nothing new to do, and
+        // logging each line turns one incident into a wall of warnings.
+        if (_rateLimitBackoff.IsEnabled && !commandDropped) return;
 
         if (commandDropped && _lastQueuedCommand is { } last)
         {
