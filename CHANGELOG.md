@@ -1,5 +1,11 @@
 # Version history
 
+## 3.47.6
+
+- Fixed Roomba losing track of items it was carrying and leaving them in your pack: a stacked pickup was counted as collected after one reply instead of all of them, and the leftover replies were then misread as somebody else dropping the item, deleting an unrelated carried move. One run left ~20 collected items untracked, including six copies of the same gloves
+- An item Roomba is holding with nowhere left to put it stays carried and is handed to the next sweep, instead of being forgotten while still in your pack
+- Rooms found full are re-checked each lap, so space you (or Roomba) free up gets used again instead of the room staying written off for the rest of the sweep
+
 ## 3.47.3
 
 - Fixed Roomba retrying an item the game refuses forever: the "GET {Amount} {Currency}" refusal uses braces, not the brackets the matcher was looking for, so it had never matched — one run sent `get piece of amber` 42 times and left the sweep ping-ponging between two rooms it could never empty

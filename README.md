@@ -1,7 +1,10 @@
 # MudPlay
 
 <!-- current-version:start -->
-> **Version 3.47.3**
+> **Version 3.47.6**
+> - Fixed Roomba losing track of items it was carrying and leaving them in your pack: a stacked pickup was counted as collected after one reply instead of all of them, and the leftover replies were then misread as somebody else dropping the item
+> - An item Roomba is holding with nowhere left to put it stays carried and is handed to the next sweep, instead of being forgotten while still in your pack
+> - Rooms found full are re-checked each lap, so space you free up gets used again
 > - Fixed Roomba retrying an item the game refuses forever: the "GET {Amount} {Currency}" refusal uses braces, not the brackets the matcher was looking for, so it had never matched — one run sent `get piece of amber` 42 times and left the sweep ping-ponging between two rooms it could never empty
 > - Roomba no longer writes off heavy items as "too heavy to carry" because your pack happened to be full of loot at the time — that call is now judged against the pack at its emptiest, while live headroom still tracks reality
 > - When your pack is so full of things Roomba didn't collect that it has room for barely one item, it now delivers what it's holding and stops with the reason, instead of shuttling a single item per round trip forever

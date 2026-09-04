@@ -1211,6 +1211,57 @@ public sealed class GhSweepManagerIntegrationTests : IDisposable
     }
 
     [Fact]
+    public void MultiUnitMove_NeedsEveryUnitConfirmed_AndSpareRepliesArentForeignDrops()
+    {
+        // Stock has no bulk verb, so a 2x move goes out as two commands and
+        // answers with two lines. Completing on the first orphaned the second,
+        // and the orphan was then misread as somebody else dropping the item —
+        // which deleted an unrelated carried move. One live run left the player
+        // holding ~20 items the sweep had collected and forgotten, six of them
+        // copies of the same gloves.
+        // Stock: no bulk verb, so a 2x move is sent as two separate commands.
+        SweepHarness h = NewSweepHarness(_root, _scratchBbs, paradigm: false);
+
+        h.Tracker.SetLocated(new RoomKey(1, 1));
+        Assert.True(h.Sweep.Start());
+
+        h.Feed("You notice 2 war hammer here.");
+        h.Observe("C", Direction.N, Direction.S);
+        h.Observe("B", Direction.S);
+        h.Observe("C", Direction.N, Direction.S);
+        h.Observe("A", Direction.N);
+        Assert.Equal(GhSweepManager.SweepPhase.Sorting, h.Sweep.Phase);
+
+        h.Observe("C", Direction.N, Direction.S);
+        Assert.Equal("get war hammer", h.Sent[^1]);
+
+        // First unit only — the move is NOT collected yet.
+        h.Feed("You took war hammer.");
+        Assert.Equal(0, h.Sweep.CarriedPendingCount);
+
+        // Second unit completes the collection.
+        h.Feed("You took war hammer.");
+        Assert.Equal(1, h.Sweep.CarriedPendingCount);
+
+        // Same rule on the way out: two units, two replies.
+        h.Observe("A", Direction.N);
+        Assert.Equal("drop war hammer", h.Sent[^1]);
+
+        h.Feed("You dropped war hammer.");
+        Assert.Equal(1, h.Sweep.CarriedPendingCount);   // still owed a unit
+        Assert.Empty(h.Sweep.MovedSoFar);
+        // The spare reply must not be mistaken for somebody else's drop — that
+        // path deletes a carried move and loses a real item.
+        Assert.DoesNotContain(h.Sweep.LeftInPlace, l => l.Reason == GhLeftReason.NotActuallyCarried);
+
+        h.Feed("You dropped war hammer.");
+        Assert.Equal(0, h.Sweep.CarriedPendingCount);
+        Assert.Equal(2, Assert.Single(h.Sweep.MovedSoFar).Count);
+
+        h.Dispose();
+    }
+
+    [Fact]
     public void CleanlyFinishedSweep_HasNothingToResume()
     {
         SweepHarness h = NewSweepHarness(_root, _scratchBbs);
@@ -1385,7 +1436,8 @@ public sealed class GhSweepManagerIntegrationTests : IDisposable
     }
 
     private static SweepHarness NewSweepHarness(string root, string scratchBbs,
-        GhSuspendedSweepStore? suspended = null, int currentWeight = 1, int maxWeight = 100)
+        GhSuspendedSweepStore? suspended = null, int currentWeight = 1, int maxWeight = 100,
+        bool paradigm = true)
     {
         Directory.CreateDirectory(Path.Combine(root, "alpha"));
         File.WriteAllText(Path.Combine(root, "alpha", "Rooms.json"), """
@@ -1447,7 +1499,7 @@ public sealed class GhSweepManagerIntegrationTests : IDisposable
             postToUi: action => action());
         sweep = new GhSweepManager(labels, runner, tracker, bfs, ground, names,
             router, coordinator, isOtherEngineBusy: () => false,
-            isParadigm: () => true, inventory: inventory, suspendedStore: suspended);
+            isParadigm: () => paradigm, inventory: inventory, suspendedStore: suspended);
 
         List<string> sent = new();
         sweep.SetWireSender(b => sent.Add(Encoding.Latin1.GetString(b).TrimEnd('\r')));

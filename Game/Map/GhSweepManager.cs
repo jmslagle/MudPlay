@@ -162,6 +162,13 @@ public sealed class GhSweepManager : IDisposable
         public required bool RequiresSearch { get; init; }
         public bool IsCarried { get; set; }
         public bool Delivered { get; set; }
+
+        // Units the game has actually confirmed for the CURRENT leg. Stock has no
+        // bulk verb, so a Count of 3 is sent as three separate commands and answers
+        // with three lines — completing the move on the first one orphans the rest,
+        // and an orphaned confirmation is then misread as somebody else's drop.
+        // Reset when the leg changes (collected -> delivering).
+        public int ConfirmedUnits { get; set; }
     }
 
     private readonly GhRoomLabelStore _labels;
@@ -745,6 +752,21 @@ public sealed class GhSweepManager : IDisposable
     private void OnSortingLapCompleted()
     {
         _sortLapCount++;
+
+        // Forget which rooms were full. "Full" is a reading taken at one moment,
+        // and a lap later it's often stale — Roomba has been emptying rooms all
+        // lap, and the player may have cleared space themselves (one run refused
+        // the catch-all early and then treated it as full for another two hours
+        // while it visibly had room). Re-learning costs one refused drop per room
+        // that really is still full, and buys back every room that isn't.
+        if (_fullRooms.Count > 0)
+        {
+            _log?.Info(LogCategory,
+                $"lap {_sortLapCount}: forgetting {_fullRooms.Count} full room(s) so any that have "
+                + "since freed up get used again");
+            _fullRooms.Clear();
+        }
+
         int movedNow = _movedSoFar.Count;
         int carriedNow = _pending.Count(p => p.IsCarried && !p.Delivered);
         bool progressed = movedNow != _progressSnapshotMoved || carriedNow != _progressSnapshotCarried;
@@ -1635,9 +1657,30 @@ public sealed class GhSweepManager : IDisposable
 
             if (dest is not { } target)
             {
+                // Never forget an item we are actually holding. Dropping the move
+                // while the item stays in the pack loses it three ways at once:
+                // the player is left holding it with nothing tracking it, its
+                // weight is misread as their gear at the next resync (which
+                // collapses the carry budget), and the sweep re-collects the same
+                // item on a later lap and abandons it again — one run left six
+                // copies of the same gloves in the pack that way.
+                //
+                // Keep it queued instead. It has nowhere to go right now, so the
+                // planner won't route to it (see the full-room filter on carried
+                // destinations), but the ledger stays honest and the
+                // suspended-sweep record hands it to the next sweep, by which time
+                // a room may have space.
+                if (move.IsCarried)
+                {
+                    _log?.Warn(LogCategory,
+                        $"nowhere left for {move.ItemName} and it's in the pack — still carrying it; "
+                        + "the next sweep delivers it once a room has space");
+                    continue;
+                }
+
                 _log?.Warn(LogCategory,
                     $"nowhere left for {move.ItemName}: every matching room and the catch-all are full "
-                    + $"— leaving it{(move.IsCarried ? " carried" : $" at {move.From}")}");
+                    + $"— leaving it at {move.From}");
                 _leftInPlace.Add(new GhSweepItemFound(move.From, move.ItemName, GhLeftReason.AllDestinationsFull));
                 _pending.Remove(move);
                 continue;
@@ -1677,6 +1720,21 @@ public sealed class GhSweepManager : IDisposable
             return;
         }
 
+        // One confirmation is one UNIT, not one move. Stock sends a 3x move as
+        // three commands and answers with three lines; completing on the first
+        // left two orphans, and an orphan is then misread as somebody else's drop
+        // — which deletes an unrelated carried move and loses a real item.
+        match.ConfirmedUnits++;
+        if (match.ConfirmedUnits < match.Count)
+        {
+            _log?.Debug(LogCategory,
+                $"{(isDrop ? "dropped" : "took")} {match.ConfirmedUnits}/{match.Count} "
+                + $"{match.ItemName} — awaiting the rest of the stack");
+            _dispatchSettle.Stop();
+            _dispatchSettle.Start();
+            return;
+        }
+
         if (isDrop)
         {
             match.Delivered = true;
@@ -1686,6 +1744,8 @@ public sealed class GhSweepManager : IDisposable
         else
         {
             match.IsCarried = true;
+            // The next leg is the delivery, which confirms its own units.
+            match.ConfirmedUnits = 0;
             _log?.Info(LogCategory,
                 $"picked up {match.Count}x {match.ItemName} at {match.From}, carrying to {match.To}");
         }
@@ -1814,6 +1874,16 @@ public sealed class GhSweepManager : IDisposable
     private void ReconcileForeignDrop(string name)
     {
         if (Phase != SweepPhase.Sorting) return;
+
+        // Only a drop we had no part in. A drop of an item we are dispatching
+        // right now is ours — an extra unit of a stack, or a reply arriving just
+        // after its move completed — and claiming it here deletes a DIFFERENT
+        // carried move of the same item, losing a real item and corrupting the
+        // weight ledger with it.
+        if (_outstandingDispatch.Any(p => SameItem(p.ItemName, name))) return;
+        if (_lastQueuedCommand is { Verb: "drop", Move: { } justSent }
+            && SameItem(justSent.ItemName, name)) return;
+
         PendingSortMove? carried = _pending.FirstOrDefault(
             p => p.IsCarried && !p.Delivered && SameItem(p.ItemName, name));
         if (carried is null) return;
@@ -2001,8 +2071,12 @@ public sealed class GhSweepManager : IDisposable
         // Weight-aware, trip-minimizing pick: keep filling the pack (nearest source
         // whose batch fits the live headroom) before delivering (nearest carried
         // destination). See GhSortPlanner.
+        // Carried items whose destination is full aren't routable — walking there
+        // only earns another refusal. They stay in the pack (and in the ledger, so
+        // the weight model stays honest) and ride out to the suspended-sweep
+        // record, which the next sweep re-adopts once a room has space.
         List<GhSortPlanner.CarriedLoad> carried = _pending
-            .Where(p => p.IsCarried && !p.Delivered)
+            .Where(p => p.IsCarried && !p.Delivered && !_fullRooms.Contains(p.To))
             .GroupBy(p => p.To)
             .Select(g => new GhSortPlanner.CarriedLoad(g.Key, g.Sum(MoveWeight)))
             .ToList();
