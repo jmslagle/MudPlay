@@ -1,7 +1,9 @@
 # MudPlay
 
 <!-- current-version:start -->
-> **Version 3.47.11**
+> **Version 3.47.13**
+> - Fixed sysop position recovery switching itself off for a whole session after one slow reply — the scan window was shorter than the probe's own timeout, so a block arriving a moment late was thrown away and read as "you don't have sysop powers"
+> - A timed-out probe now backs off for a few minutes and retries instead of staying off until the profile reloads
 > - The Roomba Log now has an "Out of space" section: which rooms ran out, what couldn't be placed, and every room that refused a drop
 > - Roomba rooms that are out of space get an amber ring on the Navigation map
 > - The Roomba Log's "left in place" reasons now name the newer cases instead of calling everything "no matching room"

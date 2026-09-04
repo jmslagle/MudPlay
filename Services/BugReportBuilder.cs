@@ -933,7 +933,7 @@ public static class BugReportBuilder
         // trace in the report.
         Kv(sb, "Sysop status probe",
             svc.SysStatus.Available ? "available"
-            : svc.SysStatus.AutoDisabled ? "auto-disabled (no room block came back)"
+            : svc.SysStatus.AutoDisabled ? "backed off after a timeout — retries shortly"
             : "off (no sysop powers set for this BBS)");
         // What the last ground-truth locate actually did. "Recovery walked me
         // backwards anyway" is unanswerable without it: the probe can be

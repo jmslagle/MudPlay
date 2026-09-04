@@ -142,4 +142,41 @@ public sealed class SysStatusProbeTests
         Assert.False(probe.Available);
         Assert.Null(await probe.QueryAsync());
     }
+
+    [Fact]
+    public async Task AutoDisableExpiresSoOneHiccupDoesNotCostTheSession()
+    {
+        // A single unanswered probe used to switch sysop status off until the
+        // profile reloaded. One user lost ~7 hours of position recovery to a
+        // reply that arrived slightly late — the same command answered fine 16
+        // minutes later. It backs off now, then retries.
+        Harness h = new();
+        h.Probe.AutoDisableFor = TimeSpan.FromMilliseconds(50);
+
+        Task<SysRoomStatus?> first = h.Probe.QueryAsync();
+        h.FireTimeout();
+        Assert.Null(await first);
+        Assert.True(h.Probe.AutoDisabled);
+        Assert.False(h.Probe.Available);
+
+        await Task.Delay(80);
+
+        Assert.False(h.Probe.AutoDisabled);
+        Assert.True(h.Probe.Available);
+        Task<SysRoomStatus?> second = h.Probe.QueryAsync();
+        h.ReplyWithRoom(2, 40);
+        Assert.Equal(new RoomKey(2, 40), (await second)!.Room);
+    }
+
+    [Fact]
+    public void ScanWindowOutlastsTheProbeTimeout()
+    {
+        // The parser must not bin a block the probe is still waiting for. A 5s
+        // window against a 6s timeout meant a reply landing at 5.5s was discarded
+        // and read as "no sysop powers".
+        SysRoomStatusParser parser = new();
+        SysStatusProbe probe = new(parser, () => true);
+
+        Assert.True(parser.ExpectingBlockWindow >= probe.Timeout);
+    }
 }

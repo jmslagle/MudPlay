@@ -1,5 +1,10 @@
 # Version history
 
+## 3.47.13
+
+- Fixed sysop position recovery switching itself off for a whole session after one slow reply — the scan window was shorter than the probe's own timeout, so a block arriving a moment late was thrown away and read as "you don't have sysop powers"
+- A timed-out probe now backs off for a few minutes and retries instead of staying off until the profile reloads; one hiccup cost a user around seven hours of recovery
+
 ## 3.47.11
 
 - The Roomba Log now has an "Out of space" section: which rooms ran out, what couldn't be placed because of it, and every room that refused a drop — previously this only reached the program log

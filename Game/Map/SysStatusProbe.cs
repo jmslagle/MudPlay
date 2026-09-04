@@ -46,8 +46,20 @@ public sealed class SysStatusProbe : IDisposable
     // Test seam — lets a test drive the timeout without real time.
     public Func<TimeSpan, Task> DelayProvider { get; set; } = Task.Delay;
 
-    // True once a probe timed out this session. Cleared by ResetAutoDisable.
-    public bool AutoDisabled { get; private set; }
+    // True while probing is switched off after a timeout. NOT permanent: a single
+    // unanswered probe used to disable sysop status for the rest of the session,
+    // which cost one user ~7 hours of position recovery after one slow reply — the
+    // same command answered fine 16 minutes later. The point of auto-disable is to
+    // stop hammering an account that lacks the privilege, and one retry every few
+    // minutes does that just as well while surviving a hiccup.
+    public bool AutoDisabled => _disabledUntilUtc is { } until && DateTimeOffset.UtcNow < until;
+
+    // How long a timeout switches probing off for. Long enough that an account
+    // without sysop powers sends a handful of refused commands an hour rather than
+    // one per recovery; short enough that a transient failure costs minutes.
+    public TimeSpan AutoDisableFor { get; set; } = TimeSpan.FromMinutes(5);
+
+    private DateTimeOffset? _disabledUntilUtc;
 
     // Whether a probe would actually be sent right now.
     public bool Available => !_disposed && !AutoDisabled && _wireSender is not null && _capabilityEnabled();
@@ -73,8 +85,8 @@ public sealed class SysStatusProbe : IDisposable
     // characters doesn't inherit a previous session's failed probe.
     public void ResetAutoDisable()
     {
-        if (!AutoDisabled) return;
-        AutoDisabled = false;
+        if (_disabledUntilUtc is null) return;
+        _disabledUntilUtc = null;
         _log?.Log(LogSeverity.Info, LogCategory, "Auto-disable cleared.");
     }
 
@@ -105,9 +117,10 @@ public sealed class SysStatusProbe : IDisposable
         if (completed != tcs.Task)
         {
             _pending = null;
-            AutoDisabled = true;
+            _disabledUntilUtc = DateTimeOffset.UtcNow + AutoDisableFor;
             _log?.Log(LogSeverity.Info, LogCategory,
-                $"No room block within {Timeout.TotalSeconds:0}s — sysop status auto-disabled for this session.");
+                $"No room block within {Timeout.TotalSeconds:0}s — sysop status off for "
+                + $"{AutoDisableFor.TotalMinutes:0} minute(s), then retried.");
             return null;
         }
 
