@@ -1067,7 +1067,7 @@ MudPlay asks in exactly two situations. The first is the moment a walk / loop / 
 
 Two things deliberately hold it back. It won't ask while a move you've already sent is still unconfirmed (the answer would describe the room you just left), so it waits for the move to land first, and it won't ask twice in quick succession — a tracker flickering in and out of lost costs you one command, not a stream of them. It also stays out of the way entirely while a teleport maze is being solved, since the maze solver does its own position fixing.
 
-**When you might change it:** Only tick it if you genuinely have sysop access on that board. On an ordinary account the command is refused, and MudPlay can't tell in advance — so it tries once, gets nothing back, and stops asking for a few minutes before trying again. That costs you an occasional rejected command rather than a stream of them, and it means a single slow reply doesn't switch the feature off for your whole session. There's still no benefit to ticking it hopefully. Left off, no `sys` command is ever sent.
+**When you might change it:** Only tick it if you genuinely have sysop access on that board. On an ordinary account the command is refused, and MudPlay can't tell in advance — so it tries once, gets nothing back, and stops asking for a few minutes before trying again. Once it has answered even once, it's trusted for the rest of the session and never switches itself off again — if it works at all, it works. That costs you an occasional rejected command rather than a stream of them, and it means a single slow reply doesn't switch the feature off for your whole session. There's still no benefit to ticking it hopefully. Left off, no `sys` command is ever sent.
 
 ### Automated Logon Menu Navigation
 

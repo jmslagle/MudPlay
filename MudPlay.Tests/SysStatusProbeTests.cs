@@ -179,4 +179,45 @@ public sealed class SysStatusProbeTests
 
         Assert.True(parser.ExpectingBlockWindow >= probe.Timeout);
     }
+
+    [Fact]
+    public async Task OnceItHasWorked_ATimeoutNeverDisablesItAgain()
+    {
+        // If it works at all, it works. A success settles the only question
+        // auto-disable asks — does this account have the privilege — so every
+        // later timeout is lag or a mangled block, not a missing power.
+        Harness h = new();
+
+        Task<SysRoomStatus?> ok = h.Probe.QueryAsync();
+        h.ReplyWithRoom(1, 100);
+        Assert.NotNull(await ok);
+
+        Task<SysRoomStatus?> late = h.Probe.QueryAsync();
+        h.FireTimeout();
+        Assert.Null(await late);
+
+        Assert.False(h.Probe.AutoDisabled);
+        Assert.True(h.Probe.Available);
+
+        // And it keeps working.
+        Task<SysRoomStatus?> again = h.Probe.QueryAsync();
+        h.ReplyWithRoom(1, 101);
+        Assert.Equal(new RoomKey(1, 101), (await again)!.Room);
+    }
+
+    [Fact]
+    public async Task AHandTypedSysStAlsoCountsAsProof()
+    {
+        // The parser reports any block it sees, solicited or not. A user typing
+        // `sys st` themselves proves the privilege just as well as our probe.
+        Harness h = new();
+        h.Parser.ObserveOutbound(System.Text.Encoding.Latin1.GetBytes("sys st\r\n"));
+        h.ReplyWithRoom(1, 55);
+
+        Task<SysRoomStatus?> timedOut = h.Probe.QueryAsync();
+        h.FireTimeout();
+        Assert.Null(await timedOut);
+
+        Assert.False(h.Probe.AutoDisabled);
+    }
 }

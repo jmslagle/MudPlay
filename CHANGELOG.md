@@ -4,6 +4,7 @@
 
 - Fixed sysop position recovery switching itself off for a whole session after one slow reply — the scan window was shorter than the probe's own timeout, so a block arriving a moment late was thrown away and read as "you don't have sysop powers"
 - A timed-out probe now backs off for a few minutes and retries instead of staying off until the profile reloads; one hiccup cost a user around seven hours of recovery
+- Once sysop status has answered even once, it's never auto-disabled again for that session — a success proves the account has the privilege, so any later silence is a hiccup rather than a missing power. A hand-typed `sys st` counts as proof too
 
 ## 3.47.11
 
