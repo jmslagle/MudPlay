@@ -1,7 +1,9 @@
 # MudPlay
 
 <!-- current-version:start -->
-> **Version 3.47.7**
+> **Version 3.47.9**
+> - Multiple catch-all rooms now work as an overflow chain instead of only the last one you ticked being kept
+> - The sweep summary now names which rooms ran out of space and what couldn't be placed, so you know which category to label another room for
 > - Fixed Resume mis-reading its own re-adopted load as your gear, which shrank the carry budget by exactly the weight it had just picked back up
 > - Fixed Roomba losing track of items it was carrying and leaving them in your pack: a stacked pickup was counted as collected after one reply instead of all of them, and the leftover replies were then misread as somebody else dropping the item
 > - An item Roomba is holding with nowhere left to put it stays carried and is handed to the next sweep, instead of being forgotten while still in your pack

@@ -520,6 +520,7 @@ public sealed class GhSweepManager : IDisposable
         _leftInPlace.Clear();
         _stranded.Clear();
         _fullRooms.Clear();
+        _saturated.Clear();
         _commandQueue.Clear();
         _lastQueuedCommand = null;
         _promptWait.Stop();
@@ -834,6 +835,8 @@ public sealed class GhSweepManager : IDisposable
                 $"sweep ending with {stillCarried.Count} item(s) still carried, undelivered: "
                 + string.Join("; ", stillCarried.Select(m => $"{m.ItemName} (from {m.From}) -> {m.To}")));
         }
+
+        ReportSaturatedCategories();
 
         // Name the rooms that hit capacity — otherwise a sweep that quietly
         // rerouted half its load reads the same as one that had nowhere to go.
@@ -1476,6 +1479,46 @@ public sealed class GhSweepManager : IDisposable
         SendNextQueuedCommand();
     }
 
+    // Which groups of rooms ran out of space, and what couldn't be placed because
+    // of it. Keyed by the set of rooms an item could legitimately have gone to, so
+    // the end-of-sweep summary can say "these rooms are all full — label another
+    // one for that category" instead of a flat list of items that went nowhere.
+    private readonly Dictionary<string, (List<RoomKey> Rooms, List<string> Items)> _saturated = new();
+
+    private void NoteSaturatedCategory(string itemName, GhItemClass? cls)
+    {
+        if (cls is not { } item) return;
+        IReadOnlyList<RoomKey> candidates = GhDestinationResolver.CandidateRooms(item, _labels.Labels);
+        if (candidates.Count == 0) return;   // nothing labelled for it — a different problem
+
+        List<RoomKey> ordered = candidates.OrderBy(r => r.Map).ThenBy(r => r.Room).ToList();
+        string key = string.Join(",", ordered);
+        if (!_saturated.TryGetValue(key, out (List<RoomKey> Rooms, List<string> Items) entry))
+        {
+            entry = (ordered, new List<string>());
+            _saturated[key] = entry;
+        }
+        if (!entry.Items.Contains(itemName)) entry.Items.Add(itemName);
+    }
+
+    // Spell out what to do about it. The per-item warnings say an item went
+    // nowhere; this says WHICH rooms are saturated, which is the thing the user
+    // can act on — label another room for that category.
+    private void ReportSaturatedCategories()
+    {
+        if (_saturated.Count == 0) return;
+        foreach ((List<RoomKey> rooms, List<string> items) in _saturated.Values
+                     .OrderByDescending(e => e.Items.Count))
+        {
+            _log?.Warn(LogCategory,
+                $"out of space for {items.Count} item type(s) — every room that takes them is full: "
+                + string.Join(", ", rooms)
+                + $". Examples: {string.Join(", ", items.Take(4))}"
+                + (items.Count > 4 ? $" (+{items.Count - 4} more)" : string.Empty)
+                + ". Label another room for this category to give them somewhere to go.");
+        }
+    }
+
     // Abandon whatever is left of the batch. Anything unsent stays on _pending
     // and is retried on a later visit, exactly like an unconfirmed command.
     private void ClearCommandQueue()
@@ -1677,12 +1720,14 @@ public sealed class GhSweepManager : IDisposable
                 // a room may have space.
                 if (move.IsCarried)
                 {
+                    NoteSaturatedCategory(move.ItemName, cls);
                     _log?.Warn(LogCategory,
                         $"nowhere left for {move.ItemName} and it's in the pack — still carrying it; "
                         + "the next sweep delivers it once a room has space");
                     continue;
                 }
 
+                NoteSaturatedCategory(move.ItemName, cls);
                 _log?.Warn(LogCategory,
                     $"nowhere left for {move.ItemName}: every matching room and the catch-all are full "
                     + $"— leaving it at {move.From}");

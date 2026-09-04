@@ -1,5 +1,10 @@
 # Version history
 
+## 3.47.9
+
+- Multiple catch-all rooms now work as an overflow chain instead of only the last one you ticked being kept — marking ten rooms previously silently left you with one
+- The sweep summary now names which rooms ran out of space and what couldn't be placed because of it, so you know which category to label another room for
+
 ## 3.47.7
 
 - Fixed Resume mis-reading its own re-adopted load as your gear, which shrank the carry budget by exactly the weight it had just picked back up and could make a resumed sweep deliver what it held and then stop
