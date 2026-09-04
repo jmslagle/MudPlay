@@ -178,6 +178,40 @@ public sealed class SysopPositionResolver : IDisposable
         return true;
     }
 
+    // One-shot for a caller that wants a single answer rather than a standing
+    // subscription — LoopRunner's "blocked at source" recovery, which needs to know
+    // where it really is before rerouting. Mirrors
+    // ParadigmPositionResolver.RequestResyncOnce so the two are interchangeable
+    // behind the recovery gate's hook: whichever of PositionResolved /
+    // LocateFailed lands first invokes the matching callback exactly once and
+    // detaches both. False means no locate could start, so the caller falls back
+    // immediately. UI-thread confined like the rest, so subscribe-then-detach needs
+    // no locking.
+    public bool RequestLocateOnce(string reason, Action<RoomKey> onResolved, Action onFailed)
+    {
+        ArgumentNullException.ThrowIfNull(onResolved);
+        ArgumentNullException.ThrowIfNull(onFailed);
+        if (!TryRequestLocate(reason, forRecovery: true)) return false;
+
+        Action<RoomKey>? resolved = null;
+        Action? failed = null;
+        resolved = key =>
+        {
+            PositionResolved -= resolved;
+            LocateFailed -= failed;
+            onResolved(key);
+        };
+        failed = () =>
+        {
+            PositionResolved -= resolved;
+            LocateFailed -= failed;
+            onFailed();
+        };
+        PositionResolved += resolved;
+        LocateFailed += failed;
+        return true;
+    }
+
     private void SendProbe(string reason)
     {
         _inFlight = true;

@@ -4828,8 +4828,15 @@ public sealed class AppServices
         // Same maze-solver guard as TryResync above — a caller's one-shot re-fix
         // (LoopRunner / AutoWalkManager leaning on rm before trusting a possibly
         // mis-anchored belief) must not race the solver's own rm during a solve.
+        // Paradigm's `rm` first, then sysop `sys st` — the same authoritative
+        // answer by a different route. Without the second, a stock realm's
+        // "blocked at source" recovery had no locator at all: it rerouted from a
+        // room the tracker had wrong, three times in one second, and failed the
+        // loop (report stock-20260904-143436).
         Recovery.TryResyncOnce = (reason, onResolved, onFailed) =>
-            !MazeSolver.Active && ParadigmResync.RequestResyncOnce(reason, onResolved, onFailed);
+            !MazeSolver.Active
+            && (ParadigmResync.RequestResyncOnce(reason, onResolved, onFailed)
+                || SysopLocate.RequestLocateOnce(reason, onResolved, onFailed));
         // Engine-less resync gap: the recovery gate above asks for an `rm` on a
         // mid-walk mismatch, but no-ops with no engine attached. A manual boat ride
         // (no engine) that disembarks into a duplicated-name room strands the tracker

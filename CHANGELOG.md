@@ -1,5 +1,10 @@
 # Version history
 
+## 3.47.16
+
+- A loop that gets blocked because it has lost track of where it is now asks the game for its position on stock realms too, not just on Paradigm — previously it rerouted from the wrong room and failed
+- Recovery attempts are spaced out, so a reroute that instantly re-blocks can no longer spend the whole retry budget in a single second without anything having had a chance to change
+
 ## 3.47.13
 
 - Fixed sysop position recovery switching itself off for a whole session after one slow reply — the scan window was shorter than the probe's own timeout, so a block arriving a moment late was thrown away and read as "you don't have sysop powers"

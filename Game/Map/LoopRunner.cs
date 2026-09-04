@@ -134,6 +134,23 @@ public sealed class LoopRunner : IRecoverableEngine
     private int _recoverAttempts;
     private const int MaxRecoverAttempts = 3;
 
+    // Minimum spacing between recovery attempts. Without it the budget could be
+    // spent in a single millisecond: a reroute from a room the tracker has wrong
+    // re-blocks immediately, re-enters recovery, and repeats — three "attempts"
+    // inside one second, none of which could have gone differently because nothing
+    // about the world changed between them (report stock-20260904-143436). An
+    // attempt is only a real chance if something has had time to change.
+    private TimeSpan _recoveryAttemptSpacing = TimeSpan.FromSeconds(2);
+    private DateTimeOffset _lastRecoveryAttemptAt = DateTimeOffset.MinValue;
+
+    // Test seam: budget tests fire attempts back-to-back on purpose, which the
+    // spacing would otherwise swallow. Zero here means "every attempt counts",
+    // which is what those tests are actually asserting.
+    internal TimeSpan RecoveryAttemptSpacingForTests
+    {
+        set => _recoveryAttemptSpacing = value;
+    }
+
     // Waypoint the walker is currently approaching during LoopState.Approaching.
     // Null when not approaching.
     private RoomKey? _approachTarget;
@@ -622,6 +639,7 @@ public sealed class LoopRunner : IRecoverableEngine
         else
         {
             _recoverAttempts = 0;
+            _lastRecoveryAttemptAt = DateTimeOffset.MinValue;
             if (State is LoopState.Running or LoopState.Paused
                        or LoopState.Approaching or LoopState.Recovering)
             {
@@ -1622,9 +1640,23 @@ public sealed class LoopRunner : IRecoverableEngine
         // fires, so the step is retried the moment a move actually lands. A
         // genuine block hit right after confusion clears still gets the full
         // budget, since only attempts taken *while confused* are exempted.
+        // Arriving again before the world could have changed isn't a new attempt,
+        // it's the same one echoing. Drop it rather than spend budget on it — the
+        // next block or mismatch re-enters, by which time a resync may have landed
+        // or the character may actually have moved.
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        if (_recoverAttempts > 0 && now - _lastRecoveryAttemptAt < _recoveryAttemptSpacing)
+        {
+            _log?.Debug("LoopRunner",
+                $"recovery re-entered {(now - _lastRecoveryAttemptAt).TotalMilliseconds:F0}ms after the "
+                + $"last attempt; too soon to be a fresh chance — ignoring. reason={reason}");
+            return;
+        }
+
         bool confused = _isConfused?.Invoke() == true;
         if (!confused)
         {
+            _lastRecoveryAttemptAt = now;
             _recoverAttempts++;
             if (_recoverAttempts > MaxRecoverAttempts)
             {
