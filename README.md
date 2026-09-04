@@ -1,18 +1,13 @@
 # MudPlay
 
 <!-- current-version:start -->
-> **Version 3.46.10**
-> - Roomba stops collecting once the pack passes 80% of its carry budget and empties down below 40% before filling again, heaviest destination first. A saturated pack used to alternate deliver-one / collect-one and walk the same long leg twice for every single item while carrying dozens it never delivered
-> - Roomba no longer collects items auto-discard is set to throw away — the two were fighting over the same loot every lap
-> - If anything else empties your hands mid-sweep (auto-discard, a manual drop), Roomba forgets the item instead of planning a delivery for something it no longer holds. This mattered: the game matches a drop's name against what you actually carry, so a drop for a missing item could latch onto a different item you still had
-> - `You may not drop that item!` now triggers the same inventory check as the currency-syntax refusal
-> - A Roomba drop the game refuses with its currency-syntax complaint now triggers an inventory check: if the item genuinely isn't held the move is discarded instead of being retried every lap
-> - Roomba sends its get/drop commands one per game prompt instead of dumping a whole room's batch at once, which was tripping the game's command-rate limit and getting the entire batch — plus the move that followed it — silently dropped
-> - A command the game reports as dropped is re-sent after a short back-off rather than lost
-> - Roomba handles a destination room being full: it reroutes everything bound there to the next room labelled for the same category, then the catch-all, instead of re-sending refused drops on every lap forever
-> - A backup room is just a second room labelled for the same category — no new setting
-> - Items with nowhere left to go are recorded with the reason rather than retried, and the sweep summary names the rooms that filled up
-> - Full rooms are now prioritised as places to collect from, since clearing the out-of-place items in them is what frees the space
+> **Version 3.49.6**
+> - Roomba reroutes around a destination room that's full, to the next room labelled for the same category and then the catch-all, instead of re-sending refused drops every lap
+> - Multiple catch-all rooms work as an overflow chain, and full rooms are re-checked each lap so space that frees up gets used
+> - Roomba paces its get/drop commands past the game's rate limit rather than flooding it and losing the whole batch
+> - Roomba leaves alone what auto-discard would bin, and no longer loses track of items it is carrying
+> - The carry budget no longer writes off heavy items because the pack was temporarily full, and a pack too full to sort stops with an explanation
+> - The Roomba Log and the map now show which rooms ran out of space and what couldn't be placed
 >
 > See the [version history](CHANGELOG.md) for the full changelog.
 <!-- current-version:end -->
