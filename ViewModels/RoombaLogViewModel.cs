@@ -18,6 +18,11 @@ public sealed partial class RoombaLogViewModel : ObservableObject, IDisposable
     [ObservableProperty] private string _movementLog = string.Empty;
     [ObservableProperty] private string _leftBehind = string.Empty;
 
+    // Rooms that refused a drop this sweep, and the categories that ran out of
+    // space because of it. These used to reach the program log only, which is the
+    // wrong place for the one thing the user can actually act on.
+    [ObservableProperty] private string _outOfSpace = string.Empty;
+
     public RoombaLogViewModel(GhSweepManager sweep)
     {
         ArgumentNullException.ThrowIfNull(sweep);
@@ -42,6 +47,8 @@ public sealed partial class RoombaLogViewModel : ObservableObject, IDisposable
         LeftBehind = _sweep.LeftInPlace.Count == 0
             ? "(nothing left behind)"
             : string.Join("\n", _sweep.LeftInPlace.Select(f => $"{f.ItemName} at {f.Room} ({DescribeReason(f.Reason)})"));
+
+        OutOfSpace = BuildOutOfSpace();
 
         int itemsSorted = _sweep.MovedSoFar.Sum(m => m.Count);
         int roomsSorted = _sweep.MovedSoFar.Select(m => m.From).Distinct().Count();
@@ -71,10 +78,40 @@ public sealed partial class RoombaLogViewModel : ObservableObject, IDisposable
         Summary = sb.ToString().TrimEnd();
     }
 
+    // Leads with what to do about it, then the evidence. A list of full rooms is
+    // only useful next to the categories they've starved.
+    private string BuildOutOfSpace()
+    {
+        var groups = _sweep.SaturatedGroups;
+        var full = _sweep.FullRooms.OrderBy(r => r.Map).ThenBy(r => r.Room).ToList();
+        if (groups.Count == 0 && full.Count == 0)
+            return "(no room ran out of space)";
+
+        StringBuilder sb = new();
+        foreach (GhSaturatedGroup g in groups)
+        {
+            sb.AppendLine($"Label another room for these — every room that takes them is full "
+                          + $"({string.Join(", ", g.Rooms)}):");
+            foreach (string item in g.ItemNames.Take(12)) sb.AppendLine($"  • {item}");
+            if (g.ItemNames.Count > 12) sb.AppendLine($"  • …and {g.ItemNames.Count - 12} more");
+            sb.AppendLine();
+        }
+
+        if (full.Count > 0)
+        {
+            sb.AppendLine($"Rooms that refused a drop this sweep ({full.Count}):");
+            sb.Append("  " + string.Join(", ", full));
+        }
+        return sb.ToString().TrimEnd();
+    }
+
     private static string DescribeReason(GhLeftReason reason) => reason switch
     {
         GhLeftReason.TooHeavy => "too heavy to carry",
         GhLeftReason.GoneBySortTime => "gone by sort time",
+        GhLeftReason.AllDestinationsFull => "every room that takes it is full",
+        GhLeftReason.NotActuallyCarried => "not in inventory — the pickup never landed",
+        GhLeftReason.AutoDiscarded => "auto-discard would bin it anyway",
         _ => "no matching room",
     };
 

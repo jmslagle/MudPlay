@@ -44,6 +44,13 @@
                            Foreground="{StaticResource ChromeFgBrush}"/>
             </Border>
 
+            <TextBlock Classes="SectionHeader" Text="Out of space"/>
+            <Border Classes="Panel" BorderBrush="{StaticResource SeverityWarnBrush}">
+                <TextBlock Text="{Binding OutOfSpace}" TextWrapping="Wrap"
+                           FontFamily="{StaticResource FontMono}"
+                           Foreground="{StaticResource ChromeFgBrush}"/>
+            </Border>
+
             <TextBlock Classes="SectionHeader" Text="Left in place"/>
             <Border Classes="Panel">
                 <TextBlock Text="{Binding LeftBehind}" TextWrapping="Wrap"

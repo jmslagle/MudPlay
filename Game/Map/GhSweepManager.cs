@@ -335,6 +335,15 @@ public sealed class GhSweepManager : IDisposable
     // "Roomba kept carrying everything" reads identically to a routing bug unless
     // you can see the destinations were simply out of space.
     public IReadOnlyCollection<RoomKey> FullRooms => _fullRooms;
+
+    // Room groups that ran out of space this sweep, worst first. Surfaced so the
+    // Roomba log can tell the user which category to label another room for
+    // instead of leaving that only in the program log.
+    public IReadOnlyList<GhSaturatedGroup> SaturatedGroups
+        => _saturated.Values
+            .OrderByDescending(e => e.Items.Count)
+            .Select(e => new GhSaturatedGroup(e.Rooms.ToList(), e.Items.ToList()))
+            .ToList();
     public IReadOnlyList<GhSweepStranded> Stranded => _stranded;
     public int CircuitRoomCount => _sweepRooms.Count;
     public int PendingMoveCount => _pending.Count(p => !p.Delivered);

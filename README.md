@@ -1,7 +1,10 @@
 # MudPlay
 
 <!-- current-version:start -->
-> **Version 3.47.9**
+> **Version 3.47.11**
+> - The Roomba Log now has an "Out of space" section: which rooms ran out, what couldn't be placed, and every room that refused a drop
+> - Roomba rooms that are out of space get an amber ring on the Navigation map
+> - The Roomba Log's "left in place" reasons now name the newer cases instead of calling everything "no matching room"
 > - Multiple catch-all rooms now work as an overflow chain instead of only the last one you ticked being kept
 > - The sweep summary now names which rooms ran out of space and what couldn't be placed, so you know which category to label another room for
 > - Fixed Resume mis-reading its own re-adopted load as your gear, which shrank the carry budget by exactly the weight it had just picked back up

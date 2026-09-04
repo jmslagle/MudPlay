@@ -1,5 +1,11 @@
 # Version history
 
+## 3.47.11
+
+- The Roomba Log now has an "Out of space" section: which rooms ran out, what couldn't be placed because of it, and every room that refused a drop — previously this only reached the program log
+- Roomba rooms that are out of space get an amber ring on the Navigation map, so you can see at a glance which ones need clearing
+- The Roomba Log's "left in place" reasons now name the newer cases instead of calling everything "no matching room"
+
 ## 3.47.9
 
 - Multiple catch-all rooms now work as an overflow chain instead of only the last one you ticked being kept — marking ten rooms previously silently left you with one
