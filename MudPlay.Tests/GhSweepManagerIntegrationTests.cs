@@ -1262,6 +1262,38 @@ public sealed class GhSweepManagerIntegrationTests : IDisposable
     }
 
     [Fact]
+    public void Resume_DoesNotCountItsOwnRestoredLoadAsThePlayersGear()
+    {
+        // CaptureCarryBaseline assumes an empty sort-load ("sorting opens with an
+        // empty sort-load"), which is true for Start and false for Resume — Resume
+        // re-adopts carried items BEFORE capturing. Counting those as the player's
+        // gear inflates base by exactly their weight, which collapses the budget,
+        // trips the too-tight-to-collect guard, and makes a resumed sweep deliver
+        // its load and stop.
+        ProfileService profile = new();
+        profile.LoadBlank();
+        GhSuspendedSweepStore store = new(profile);
+        store.Save(new[]
+        {
+            new GhSuspendedMove("1/3", "1/1", "adamantite hauberk", 1, carried: true, hidden: false),
+        });
+
+        // Pack reads 3000 of 5280, and 800 of that is the hauberk we just re-adopted.
+        SweepHarness h = NewSweepHarness(_root, _scratchBbs, store,
+            currentWeight: 3000, maxWeight: 5280);
+
+        h.Tracker.SetLocated(new RoomKey(1, 1));
+        Assert.True(h.Sweep.Resume());
+        Assert.Equal(1, h.Sweep.CarriedPendingCount);
+
+        // Base is the player's 2200, not the 3000 that includes our own load.
+        Assert.Equal(3080, h.Sweep.WorkingWeightBudget);
+        Assert.Equal(3080, h.Sweep.BestCaseBudgetForTests);
+
+        h.Dispose();
+    }
+
+    [Fact]
     public void CleanlyFinishedSweep_HasNothingToResume()
     {
         SweepHarness h = NewSweepHarness(_root, _scratchBbs);

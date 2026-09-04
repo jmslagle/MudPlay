@@ -876,16 +876,21 @@ public sealed class GhSweepManager : IDisposable
         if (_inventory?.Snapshot.Encumbrance is { MaxWeight: > 0 } enc)
         {
             _maxCarryWeight = enc.MaxWeight;
-            _baseCarryWeight = enc.CurrentWeight;
+            // Discount anything the sort ledger already owns. A fresh sort opens
+            // with an empty load so this changes nothing there — but Resume enters
+            // Sorting ALREADY carrying the items it re-adopted, and counting those
+            // as the player's gear inflates base by exactly their weight. That
+            // collapses the budget, trips the too-tight-to-collect guard, and the
+            // resumed sweep delivers its load and immediately stops.
+            _baseCarryWeight = Math.Max(0, enc.CurrentWeight - LedgerCarriedWeight());
         }
         else
         {
             _maxCarryWeight = int.MaxValue;
             _baseCarryWeight = 0;
         }
-        // Sorting opens with an empty sort-load, so this reading is the cleanest
-        // base we'll get — but a later resync can still beat it if the player
-        // sheds gear, so track the minimum rather than pinning this one.
+        // A later resync can still beat this reading if the player sheds gear, so
+        // track the minimum rather than pinning the opening one.
         _minBaseCarryWeight = _baseCarryWeight;
     }
 

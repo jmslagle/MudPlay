@@ -1,5 +1,9 @@
 # Version history
 
+## 3.47.7
+
+- Fixed Resume mis-reading its own re-adopted load as your gear, which shrank the carry budget by exactly the weight it had just picked back up and could make a resumed sweep deliver what it held and then stop
+
 ## 3.47.6
 
 - Fixed Roomba losing track of items it was carrying and leaving them in your pack: a stacked pickup was counted as collected after one reply instead of all of them, and the leftover replies were then misread as somebody else dropping the item, deleting an unrelated carried move. One run left ~20 collected items untracked, including six copies of the same gloves
