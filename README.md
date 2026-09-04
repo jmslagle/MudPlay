@@ -1,40 +1,11 @@
 # MudPlay
 
 <!-- current-version:start -->
-> **Version 3.47.16**
-> - A loop blocked because it lost track of where it is now asks the game for its position on stock realms too, not just on Paradigm — previously it rerouted from the wrong room and failed
-> - Recovery attempts are spaced out, so a reroute that instantly re-blocks can no longer spend the whole retry budget in a single second
-> - Fixed sysop position recovery switching itself off for a whole session after one slow reply — the scan window was shorter than the probe's own timeout, so a block arriving a moment late was thrown away and read as "you don't have sysop powers"
-> - A timed-out probe now backs off for a few minutes and retries instead of staying off until the profile reloads
-> - Once sysop status has answered even once, it's never auto-disabled again for that session — a success proves the privilege, so later silence is a hiccup rather than a missing power
-> - The Roomba Log now has an "Out of space" section: which rooms ran out, what couldn't be placed, and every room that refused a drop
-> - Roomba rooms that are out of space get an amber ring on the Navigation map
-> - The Roomba Log's "left in place" reasons now name the newer cases instead of calling everything "no matching room"
-> - Multiple catch-all rooms now work as an overflow chain instead of only the last one you ticked being kept
-> - The sweep summary now names which rooms ran out of space and what couldn't be placed, so you know which category to label another room for
-> - Fixed Resume mis-reading its own re-adopted load as your gear, which shrank the carry budget by exactly the weight it had just picked back up
-> - Fixed Roomba losing track of items it was carrying and leaving them in your pack: a stacked pickup was counted as collected after one reply instead of all of them, and the leftover replies were then misread as somebody else dropping the item
-> - An item Roomba is holding with nowhere left to put it stays carried and is handed to the next sweep, instead of being forgotten while still in your pack
-> - Rooms found full are re-checked each lap, so space you free up gets used again
-> - Fixed Roomba retrying an item the game refuses forever: the "GET {Amount} {Currency}" refusal uses braces, not the brackets the matcher was looking for, so it had never matched — one run sent `get piece of amber` 42 times and left the sweep ping-ponging between two rooms it could never empty
-> - Roomba no longer writes off heavy items as "too heavy to carry" because your pack happened to be full of loot at the time — that call is now judged against the pack at its emptiest, while live headroom still tracks reality
-> - When your pack is so full of things Roomba didn't collect that it has room for barely one item, it now delivers what it's holding and stops with the reason, instead of shuttling a single item per round trip forever
-> - Roomba's command pacing no longer speeds up when the game tells it to slow down: a prompt can gate a send but can't release one early, since every rate-limit line the game emits carries a prompt of its own
-> - A run of rate-limit complaints is treated as one incident rather than restarting the back-off (and filling the log) once per line
-> - An interrupted sweep no longer dumps its load on you: whatever Roomba was still carrying is remembered per character and delivered by the next sweep, verified against a real inventory read first so anything you dealt with by hand is dropped from the list
-> - New **Resume** button on the Roomba tab — carries on from a stopped sweep's queue without re-walking the whole circuit to rediscover what it already found. It's always visible and greys out when there's nothing to resume, and the queue is saved per character so it survives closing the client
-> - The manifest survives an app restart or a relog, so it can't be defeated by whatever ended the sweep
-> - Roomba stops collecting once the pack passes 80% of its carry budget and empties down below 40% before filling again, heaviest destination first. A saturated pack used to alternate deliver-one / collect-one and walk the same long leg twice for every single item while carrying dozens it never delivered
-> - Roomba no longer collects items auto-discard is set to throw away — the two were fighting over the same loot every lap
-> - If anything else empties your hands mid-sweep (auto-discard, a manual drop), Roomba forgets the item instead of planning a delivery for something it no longer holds. This mattered: the game matches a drop's name against what you actually carry, so a drop for a missing item could latch onto a different item you still had
-> - `You may not drop that item!` now triggers the same inventory check as the currency-syntax refusal
-> - A Roomba drop the game refuses with its currency-syntax complaint now triggers an inventory check: if the item genuinely isn't held the move is discarded instead of being retried every lap
-> - Roomba sends its get/drop commands one per game prompt instead of dumping a whole room's batch at once, which was tripping the game's command-rate limit and getting the entire batch — plus the move that followed it — silently dropped
-> - A command the game reports as dropped is re-sent after a short back-off rather than lost
-> - Roomba handles a destination room being full: it reroutes everything bound there to the next room labelled for the same category, then the catch-all, instead of re-sending refused drops on every lap forever
-> - A backup room is just a second room labelled for the same category — no new setting
-> - Items with nowhere left to go are recorded with the reason rather than retried, and the sweep summary names the rooms that filled up
-> - Full rooms are now prioritised as places to collect from, since clearing the out-of-place items in them is what frees the space
+> **Version 3.50.0**
+> - An interrupted sweep no longer dumps its load on you: what Roomba was carrying and what it still had to do are remembered per character, verified against a real inventory read, and picked up next time
+> - New **Resume** button on the Roomba tab — carries on from a stopped sweep without re-walking the whole circuit, and survives closing the client
+> - A loop blocked because it lost track of where it is now asks the game for its position on stock realms too, not just on Paradigm
+> - Recovery attempts are spaced out, so a reroute that instantly re-blocks can't spend the whole retry budget in one second
 >
 > See the [version history](CHANGELOG.md) for the full changelog.
 <!-- current-version:end -->
